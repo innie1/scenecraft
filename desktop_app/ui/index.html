@@ -109,13 +109,26 @@
     color: var(--text); border-radius: 4px; padding: 5px 8px; }
 
   /* Composer: local, offline pattern-matched edit commands */
-  .composer-bar { display: flex; gap: 8px; flex: 0 0 auto; }
-  #composer-input {
-    flex: 1; background: var(--panel); border: 1px solid var(--border); color: var(--text);
-    border-radius: 6px; padding: 8px 12px; font-size: 13px;
+  .composer-bar { display: flex; flex-direction: column; gap: 6px; flex: 0 0 auto; }
+  .composer-input-wrap {
+    display: flex; align-items: center; gap: 8px;
+    background: var(--panel); border: 1px solid var(--border); border-radius: 24px;
+    padding: 4px 4px 4px 16px; transition: border-color 0.15s;
   }
-  #composer-input:focus { outline: none; border-color: var(--accent); }
-  #composer-status { flex: 0 0 auto; align-self: center; color: var(--text-muted); font-size: 12px; max-width: 260px; }
+  .composer-input-wrap:focus-within { border-color: var(--accent); }
+  #composer-input {
+    flex: 1; background: transparent; border: none; color: var(--text);
+    font-size: 13px; padding: 8px 0; outline: none;
+  }
+  .composer-send-btn {
+    flex: 0 0 auto; width: 34px; height: 34px; padding: 0; border-radius: 50%;
+    background: var(--accent); border: none; color: #121212;
+    display: flex; align-items: center; justify-content: center; cursor: pointer;
+    transition: opacity 0.15s; margin: 0;
+  }
+  .composer-send-btn:hover { opacity: 0.82; border-color: transparent; }
+  .composer-send-btn svg { width: 15px; height: 15px; transform: translateX(-1px); }
+  #composer-status { font-size: 12px; color: var(--text-muted); padding-left: 16px; min-height: 14px; }
 
   #settings-btn { width: 30px; height: 30px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
   #settings-btn svg { width: 16px; height: 16px; }
@@ -126,12 +139,21 @@
   }
 
   .timeline-scroll {
+    position: relative;
     overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 8px;
     background: var(--panel);
   }
-  .timeline-ruler { height: 20px; position: relative; border-bottom: 1px solid var(--border); }
+  .timeline-ruler { height: 20px; position: relative; border-bottom: 1px solid var(--border); cursor: pointer; }
   .timeline-ruler span {
     position: absolute; top: 3px; font-size: 10px; color: var(--text-muted); white-space: nowrap;
+  }
+  .timeline-playhead {
+    position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent);
+    z-index: 5; cursor: ew-resize; pointer-events: auto;
+  }
+  .timeline-playhead::before {
+    content: ''; position: absolute; top: -1px; left: -4px; width: 10px; height: 10px;
+    background: var(--accent); border-radius: 2px;
   }
   .track-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); }
   .track-row:last-child { border-bottom: none; }
@@ -331,6 +353,7 @@
       </div>
 
       <div class="timeline-scroll">
+        <div id="timeline-playhead" class="timeline-playhead"></div>
         <div class="track-row">
           <span class="track-label"></span>
           <div id="timeline-ruler" class="timeline-ruler"></div>
@@ -351,9 +374,16 @@
     </div>
 
     <div class="composer-bar">
-      <input id="composer-input" type="text"
-             placeholder='Type an edit, e.g. "cut the first 5 seconds", "generate a motion graphic of a bouncing logo", "export"' />
-      <button id="composer-send" class="primary">Run</button>
+      <div class="composer-input-wrap">
+        <input id="composer-input" type="text"
+               placeholder='Type an edit, e.g. "cut the first 5 seconds", "generate a motion graphic of a bouncing logo", "export"' />
+        <button id="composer-send" class="composer-send-btn" title="Send">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="22" y1="2" x2="11" y2="13"></line>
+            <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+          </svg>
+        </button>
+      </div>
       <span id="composer-status"></span>
     </div>
   </main>
@@ -456,6 +486,8 @@
   previewEl.addEventListener('seeked', updateCaptionOverlay);
   const statusEl = document.getElementById('status');
   const timelineRulerEl = document.getElementById('timeline-ruler');
+  const timelineScrollEl = document.querySelector('.timeline-scroll');
+  const timelinePlayheadEl = document.getElementById('timeline-playhead');
   const trackLaneEls = {
     video: document.getElementById('track-lane-video'),
     audio: document.getElementById('track-lane-audio'),
@@ -554,6 +586,38 @@
     }
   }
 
+  // ---- timeline playhead: synced to the video, click/drag to scrub ----
+  const TRACK_LABEL_WIDTH = 56;
+
+  function updatePlayheadPosition() {
+    const t = previewEl.currentTime || 0;
+    timelinePlayheadEl.style.left = (TRACK_LABEL_WIDTH + t * PX_PER_SEC) + 'px';
+  }
+  previewEl.addEventListener('timeupdate', updatePlayheadPosition);
+  previewEl.addEventListener('seeked', updatePlayheadPosition);
+
+  function seekFromContentX(contentX) {
+    const time = Math.max(0, (contentX - TRACK_LABEL_WIDTH) / PX_PER_SEC);
+    previewEl.currentTime = time;
+  }
+
+  timelineRulerEl.addEventListener('click', e => {
+    const rect = timelineScrollEl.getBoundingClientRect();
+    seekFromContentX(e.clientX - rect.left + timelineScrollEl.scrollLeft);
+  });
+
+  let playheadDragging = false;
+  timelinePlayheadEl.addEventListener('mousedown', e => {
+    playheadDragging = true;
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', e => {
+    if (!playheadDragging) return;
+    const rect = timelineScrollEl.getBoundingClientRect();
+    seekFromContentX(e.clientX - rect.left + timelineScrollEl.scrollLeft);
+  });
+  document.addEventListener('mouseup', () => { playheadDragging = false; });
+
   function renderTrackLane(kind, clips, widthPx) {
     const lane = trackLaneEls[kind];
     lane.innerHTML = '';
@@ -585,6 +649,7 @@
       renderTrackLane(kind, track.clips, widthPx);
     });
     updateCaptionOverlay();
+    updatePlayheadPosition();
   }
 
   function startClipDrag(e, boxEl, clip, kind) {
@@ -622,6 +687,54 @@
     if (result.error) { alert(result.error); }
     refreshTracks();
   }
+
+  // ---- keyboard control: space to play/pause, arrows to seek or nudge
+  // the selected clip, so the mouse isn't required for basic editing ----
+  function findSelectedClip() {
+    if (!selectedClipId) return null;
+    for (const track of currentTracks) {
+      const clip = (track.clips || []).find(c => c.id === selectedClipId);
+      if (clip) return { kind: track.kind, clip };
+    }
+    return null;
+  }
+
+  async function nudgeSelectedClip(deltaSeconds) {
+    const found = findSelectedClip();
+    if (!found) return;
+    const newStart = Math.max(0, found.clip.start_time + deltaSeconds);
+    const result = await window.pywebview.api.move_clip(found.kind, found.clip.id, newStart);
+    if (result.error) { alert(result.error); return; }
+    refreshTracks();
+  }
+
+  document.addEventListener('keydown', e => {
+    // never hijack typing — inputs/textareas/selects (composer, rename,
+    // script textarea, transcript search, aspect-ratio picker, trim
+    // fields) all need their own arrow/space/backspace behavior
+    const activeTag = document.activeElement ? document.activeElement.tagName : '';
+    if (activeTag === 'INPUT' || activeTag === 'TEXTAREA' || activeTag === 'SELECT') return;
+    if (getComputedStyle(editorScreenEl).display === 'none') return; // only on the editor screen
+
+    if (e.code === 'Space') {
+      e.preventDefault();
+      if (previewEl.paused) previewEl.play(); else previewEl.pause();
+      return;
+    }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      e.preventDefault();
+      const sign = e.key === 'ArrowLeft' ? -1 : 1;
+      if (selectedClipId) {
+        // moving a clip in whole seconds is more useful than sub-second —
+        // shift for a coarser 1s nudge, plain for a fine 0.1s one
+        nudgeSelectedClip(sign * (e.shiftKey ? 1 : 0.1));
+      } else {
+        // plain arrow = ~1s (close enough to "a frame or two" without
+        // needing to know the source's actual fps), shift = 5s jump
+        previewEl.currentTime = Math.max(0, previewEl.currentTime + sign * (e.shiftKey ? 5 : 1));
+      }
+    }
+  });
 
   Object.values(trackLaneEls).forEach(lane => {
     lane.addEventListener('click', () => {
