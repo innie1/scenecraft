@@ -77,6 +77,17 @@
     min-height: 0;
   }
 
+  /* Top row: narrow icon rail + preview/transcript, side by side */
+  .editor-top { display: flex; gap: 10px; flex: 1; min-height: 0; }
+
+  .tool-rail-vertical {
+    flex: 0 0 32px; width: 32px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .tool-rail-vertical .icon-btn { width: 32px; height: 32px; }
+  .tool-rail-vertical .icon-btn svg { width: 16px; height: 16px; }
+
+  .preview-area { flex: 1; min-width: 0; position: relative; display: flex; }
+
   .preview-wrap { position: relative; flex: 1; min-height: 0; background: #000; border-radius: 8px; overflow: hidden; }
   .preview-wrap video { width: 100%; height: 100%; object-fit: contain; }
   .preview-empty {
@@ -116,10 +127,6 @@
   .clip-box.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .clip-box.dragging { opacity: 0.8; cursor: grabbing; }
 
-  .tool-rail {
-    display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
-    border-top: 1px solid var(--border); padding-top: 12px;
-  }
   .icon-btn {
     width: 36px; height: 36px; padding: 0; display: flex; align-items: center; justify-content: center;
     border-radius: 8px;
@@ -128,18 +135,19 @@
   .icon-btn.active { border-color: var(--accent); color: var(--accent); }
   .status-text { color: var(--text-muted); font-size: 12px; margin-left: 4px; }
 
+  /* Transcript panel fills the same slot the preview normally occupies */
   .transcript-panel {
-    flex: 0 0 auto; max-height: 220px; display: flex; flex-direction: column; gap: 8px;
+    flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px;
     background: var(--panel-raised); border: 1px solid var(--border); border-radius: 8px;
     padding: 12px; overflow: hidden;
   }
-  .transcript-panel-header { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+  .transcript-panel-header { display: flex; justify-content: space-between; align-items: center; font-size: 12px; flex: 0 0 auto; }
   .transcript-panel-header strong { color: var(--text); }
   #transcript-search {
-    background: var(--bg); border: 1px solid var(--border);
+    flex: 0 0 auto; background: var(--bg); border: 1px solid var(--border);
     color: var(--text); border-radius: 4px; padding: 6px 8px; font-size: 12px;
   }
-  .transcript-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+  .transcript-list { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
   .transcript-row { padding: 6px 8px; border-radius: 4px; cursor: pointer; line-height: 1.4; font-size: 12px; }
   .transcript-row:hover { background: var(--bg); }
   .transcript-row .ts { color: var(--accent); margin-right: 6px; font-variant-numeric: tabular-nums; }
@@ -192,15 +200,59 @@
   </header>
 
   <main class="editor-main">
-    <div class="preview-wrap">
-      <video id="preview" controls></video>
-      <div id="preview-empty" class="preview-empty">No video imported yet</div>
+    <div class="editor-top">
+      <div class="tool-rail-vertical">
+        <button id="import-btn" class="icon-btn" title="Import video">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="3" x2="12" y2="15"></line>
+          </svg>
+        </button>
+        <button id="audio-btn" class="icon-btn" title="Add audio (coming soon)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 18V5l12-2v13"></path>
+            <circle cx="6" cy="18" r="3"></circle>
+            <circle cx="18" cy="16" r="3"></circle>
+          </svg>
+        </button>
+        <button id="text-btn" class="icon-btn" title="Add text (coming soon)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="4 7 4 4 20 4 20 7"></polyline>
+            <line x1="9" y1="20" x2="15" y2="20"></line>
+            <line x1="12" y1="4" x2="12" y2="20"></line>
+          </svg>
+        </button>
+        <button id="transcribe-btn" class="icon-btn" title="Transcribe">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+          </svg>
+        </button>
+      </div>
+
+      <div class="preview-area">
+        <div class="preview-wrap">
+          <video id="preview" controls></video>
+          <div id="preview-empty" class="preview-empty">No video imported yet</div>
+        </div>
+
+        <div id="transcript-panel" class="transcript-panel" style="display:none;">
+          <div class="transcript-panel-header">
+            <strong>Transcript</strong>
+            <span id="transcript-status" style="color: var(--text-muted);"></span>
+          </div>
+          <input id="transcript-search" type="text" placeholder="Search transcript…" />
+          <div id="transcript-list" class="transcript-list"></div>
+        </div>
+      </div>
     </div>
 
     <div class="timeline-container">
       <div class="trim-controls">
         <label>Start (s) <input id="start" type="number" min="0" step="0.1" value="0" /></label>
         <label>End (s) <input id="end" type="number" min="0" step="0.1" value="5" /></label>
+        <button id="cut-btn">Cut</button>
+        <span id="status" class="status-text"></span>
       </div>
 
       <div class="timeline-scroll">
@@ -222,40 +274,6 @@
         </div>
       </div>
     </div>
-
-    <div class="tool-rail">
-      <button id="import-btn" class="icon-btn" title="Import video">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-          <polyline points="17 8 12 3 7 8"></polyline>
-          <line x1="12" y1="3" x2="12" y2="15"></line>
-        </svg>
-      </button>
-      <button id="cut-btn" class="icon-btn" title="Cut scene">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <circle cx="6" cy="6" r="3"></circle>
-          <circle cx="6" cy="18" r="3"></circle>
-          <line x1="20" y1="4" x2="8.12" y2="15.88"></line>
-          <line x1="14.47" y1="14.48" x2="20" y2="20"></line>
-          <line x1="8.12" y1="8.12" x2="12" y2="12"></line>
-        </svg>
-      </button>
-      <button id="transcribe-btn" class="icon-btn" title="Transcribe">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-        </svg>
-      </button>
-      <span id="status" class="status-text"></span>
-    </div>
-
-    <div id="transcript-panel" class="transcript-panel" style="display:none;">
-      <div class="transcript-panel-header">
-        <strong>Transcript</strong>
-        <span id="transcript-status" style="color: var(--text-muted);"></span>
-      </div>
-      <input id="transcript-search" type="text" placeholder="Search transcript…" />
-      <div id="transcript-list" class="transcript-list"></div>
-    </div>
   </main>
 </div>
 
@@ -275,6 +293,7 @@
   const editorScreenEl = document.getElementById('editor-screen');
   const previewEl = document.getElementById('preview');
   const previewEmptyEl = document.getElementById('preview-empty');
+  const previewWrapEl = document.querySelector('.preview-wrap');
   const statusEl = document.getElementById('status');
   const timelineRulerEl = document.getElementById('timeline-ruler');
   const trackLaneEls = {
@@ -423,6 +442,14 @@
     });
   });
 
+  // The transcript/search panel replaces the video preview in the same
+  // slot (chosen over adding a separate panel below the tool rail, to
+  // keep the top row compact) — toggled by the Transcribe icon.
+  function showPreviewPane(which) {
+    previewWrapEl.style.display = which === 'video' ? 'flex' : 'none';
+    transcriptPanelEl.style.display = which === 'transcript' ? 'flex' : 'none';
+  }
+
   function renderTranscript(segments) {
     transcriptListEl.innerHTML = '';
     (segments || []).forEach(seg => {
@@ -458,15 +485,14 @@
 
     currentTranscript = project.transcript || [];
     transcriptSearchEl.value = '';
+    showPreviewPane('video'); // always land on the video, even if a transcript already exists
     if (currentTranscript.length) {
       transcriptStatusEl.textContent = `${currentTranscript.length} segments`;
       renderTranscript(currentTranscript);
-      transcriptPanelEl.style.display = 'flex';
       transcribeBtnEl.classList.add('active');
     } else {
       transcriptStatusEl.textContent = '';
       transcriptListEl.innerHTML = '';
-      transcriptPanelEl.style.display = 'none';
       transcribeBtnEl.classList.remove('active');
     }
 
@@ -569,9 +595,18 @@
     renderTracks(tracks);
   }
 
-  async function transcribeVideo() {
+  async function toggleTranscribe() {
+    const showingTranscript = transcriptPanelEl.style.display === 'flex';
+    if (showingTranscript) {
+      showPreviewPane('video'); // clicking again while open switches back to the video
+      return;
+    }
+    showPreviewPane('transcript');
+    if (currentTranscript.length > 0) {
+      return; // already transcribed — just showing the panel, no need to re-run
+    }
+
     transcribeBtnEl.disabled = true;
-    transcriptPanelEl.style.display = 'flex';
     transcriptStatusEl.textContent = 'Transcribing… this can take a while.';
     transcriptListEl.innerHTML = '';
     const result = await window.pywebview.api.transcribe();
@@ -601,8 +636,14 @@
   document.getElementById('open-project-btn').addEventListener('click', openProjectFlow);
   headerTitleEl.addEventListener('click', startRenameProject);
   document.getElementById('import-btn').addEventListener('click', importVideo);
+  document.getElementById('audio-btn').addEventListener('click', () => {
+    statusEl.textContent = 'Adding audio clips is coming soon.';
+  });
+  document.getElementById('text-btn').addEventListener('click', () => {
+    statusEl.textContent = 'Adding text clips is coming soon.';
+  });
   document.getElementById('cut-btn').addEventListener('click', cutScene);
-  document.getElementById('transcribe-btn').addEventListener('click', transcribeVideo);
+  document.getElementById('transcribe-btn').addEventListener('click', toggleTranscribe);
   document.getElementById('export-btn').addEventListener('click', async () => {
     statusEl.textContent = 'Exporting…';
     const result = await window.pywebview.api.export_project();
