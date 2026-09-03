@@ -164,9 +164,32 @@ class Api:
         self._save_project()
         return {"ok": True}
 
-    def pick_video_file(self):
-        """Quick, unnamed open — used by the plain 'Open video' entry point.
-        Not persisted to disk; use start_project() to create a saved project."""
+    def _generate_project_name(self) -> str:
+        n = 1
+        while (SCENECRAFT_ROOT / f"Project {n}").exists():
+            n += 1
+        return f"Project {n}"
+
+    def new_project(self):
+        """No prompt, no file picker — creates an empty, auto-named project
+        and saves it immediately so there's a real project.json on disk to
+        come back to. The user imports a video afterward, from inside the
+        editor (see import_video)."""
+        name = self._generate_project_name()
+        project = project_state.Project(name=name, source_video="")
+        path = str(SCENECRAFT_ROOT / project.name / "project.json")
+        project_state.save(project, path)
+
+        self.project = project
+        self.project_path = path
+        return {"path": None, "info": None, "project": self._project_payload()}
+
+    def import_video(self):
+        """Opens the video picker and adds the result to the video track
+        (full length, at the end of whatever's already there), and makes
+        it the project's active source for cut/transcribe."""
+        if not self.project:
+            return {"error": "No project loaded."}
         result = webview.windows[0].create_file_dialog(
             webview.OPEN_DIALOG,
             file_types=("Video files (*.mp4;*.mov;*.mkv;*.avi)", "All files (*.*)"),
@@ -174,12 +197,45 @@ class Api:
         if not result:
             return None
         source = result[0]
-        self.project = project_state.Project(
-            name=Path(source).stem, source_video=source
+        try:
+            info = ffmpeg_ops.probe(source)
+        except Exception as e:
+            return {"error": str(e)}
+
+        self.project.source_video = source
+        video_track = self.project.track("video")
+        timeline_start = max((c.end_time for c in video_track.clips), default=0.0)
+        clip = project_state.Clip(
+            id=f"import_{len(video_track.clips) + 1}",
+            source_path=source,
+            in_point=0.0,
+            out_point=info["duration_seconds"],
+            start_time=timeline_start,
         )
-        self.project_path = None
-        info = ffmpeg_ops.probe(source)
+        self.project.add_clip(clip, track="video")
+        self._save_project()
         return {"path": self._media_url(source), "info": info, "project": self._project_payload()}
+
+    def rename_project(self, name: str):
+        if not self.project:
+            return {"error": "No project loaded."}
+        name = name.strip()
+        if not name:
+            return {"error": "Project name is required."}
+        if name == self.project.name:
+            return {"ok": True, "name": self.project.name}
+
+        new_dir = SCENECRAFT_ROOT / name
+        if new_dir.exists():
+            return {"error": f"A project named {name!r} already exists."}
+
+        old_dir = SCENECRAFT_ROOT / self.project.name
+        if self.project_path and old_dir.is_dir():
+            old_dir.rename(new_dir)
+        self.project.name = name
+        self.project_path = str(new_dir / "project.json")
+        self._save_project()
+        return {"ok": True, "name": self.project.name}
 
     def list_projects(self):
         """Names + paths of saved projects under ~/Scenecraft."""
@@ -196,31 +252,6 @@ class Api:
                 continue
             projects.append({"name": proj.name, "path": str(project_file)})
         return projects
-
-    def start_project(self, name: str):
-        """Prompt-driven flow: name is collected by the UI first, then this
-        opens the video picker, creates the project, and saves it immediately."""
-        if not name or not name.strip():
-            return {"error": "Project name is required."}
-        result = webview.windows[0].create_file_dialog(
-            webview.OPEN_DIALOG,
-            file_types=("Video files (*.mp4;*.mov;*.mkv;*.avi)", "All files (*.*)"),
-        )
-        if not result:
-            return None
-        source = result[0]
-        try:
-            info = ffmpeg_ops.probe(source)
-        except Exception as e:
-            return {"error": str(e)}
-
-        project = project_state.Project(name=name.strip(), source_video=source)
-        path = str(SCENECRAFT_ROOT / project.name / "project.json")
-        project_state.save(project, path)
-
-        self.project = project
-        self.project_path = path
-        return {"path": self._media_url(source), "info": info, "project": self._project_payload()}
 
     def open_project(self, path: str):
         try:
@@ -241,7 +272,9 @@ class Api:
         places it as a new clip on the video track, appended after
         whatever's already there."""
         if not self.project:
-            return {"error": "No project loaded. Pick a video first."}
+            return {"error": "No project loaded."}
+        if not self.project.source_video:
+            return {"error": "Import a video first."}
         video_track = self.project.track("video")
         out_dir = SCENECRAFT_ROOT / self.project.name / "scenes"
         scene_id = f"scene_{len(video_track.clips) + 1}"
@@ -282,7 +315,9 @@ class Api:
 
     def transcribe(self):
         if not self.project:
-            return {"error": "No project loaded. Pick a video first."}
+            return {"error": "No project loaded."}
+        if not self.project.source_video:
+            return {"error": "Import a video first."}
         try:
             segments = whisper_ops.transcribe(self.project.source_video)
         except Exception as e:

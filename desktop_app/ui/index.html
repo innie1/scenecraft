@@ -60,6 +60,12 @@
   .header-left { display: flex; align-items: center; gap: 10px; }
   #back-btn { width: 30px; height: 30px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
   #back-btn svg { width: 16px; height: 16px; }
+  #header-title { cursor: pointer; border-radius: 4px; padding: 2px 6px; margin: 0 -6px; }
+  #header-title:hover { background: var(--panel); }
+  .header-title-input {
+    font-size: 15px; font-weight: 500; font-family: inherit; background: var(--panel);
+    border: 1px solid var(--accent); color: var(--text); border-radius: 4px; padding: 2px 6px;
+  }
 
   .editor-main {
     flex: 1;
@@ -71,7 +77,12 @@
     min-height: 0;
   }
 
-  video { width: 100%; flex: 1; min-height: 0; background: #000; border-radius: 8px; object-fit: contain; }
+  .preview-wrap { position: relative; flex: 1; min-height: 0; background: #000; border-radius: 8px; overflow: hidden; }
+  .preview-wrap video { width: 100%; height: 100%; object-fit: contain; }
+  .preview-empty {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: var(--text-muted); font-size: 13px; pointer-events: none;
+  }
 
   .timeline-container { display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto; }
   .trim-controls { display: flex; gap: 10px; align-items: center; font-size: 13px; flex: 0 0 auto; }
@@ -181,7 +192,10 @@
   </header>
 
   <main class="editor-main">
-    <video id="preview" controls></video>
+    <div class="preview-wrap">
+      <video id="preview" controls></video>
+      <div id="preview-empty" class="preview-empty">No video imported yet</div>
+    </div>
 
     <div class="timeline-container">
       <div class="trim-controls">
@@ -210,6 +224,13 @@
     </div>
 
     <div class="tool-rail">
+      <button id="import-btn" class="icon-btn" title="Import video">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="17 8 12 3 7 8"></polyline>
+          <line x1="12" y1="3" x2="12" y2="15"></line>
+        </svg>
+      </button>
       <button id="cut-btn" class="icon-btn" title="Cut scene">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="6" cy="6" r="3"></circle>
@@ -253,6 +274,7 @@
   const startScreenEl = document.getElementById('start-screen');
   const editorScreenEl = document.getElementById('editor-screen');
   const previewEl = document.getElementById('preview');
+  const previewEmptyEl = document.getElementById('preview-empty');
   const statusEl = document.getElementById('status');
   const timelineRulerEl = document.getElementById('timeline-ruler');
   const trackLaneEls = {
@@ -420,7 +442,14 @@
 
   function hydrateProject(result) {
     if (!result) return;
-    previewEl.src = result.path; // already a served http://127.0.0.1:<port>/media?... URL
+    if (result.path) {
+      previewEl.src = result.path; // already a served http://127.0.0.1:<port>/media?... URL
+      previewEmptyEl.style.display = 'none';
+    } else {
+      previewEl.removeAttribute('src');
+      previewEl.load();
+      previewEmptyEl.style.display = 'flex';
+    }
 
     const project = result.project || {};
     headerTitleEl.textContent = project.name || 'Scenecraft';
@@ -445,25 +474,51 @@
     showScreen('editor');
   }
 
-  function newProjectFlow() {
-    showModal('New project');
+  async function newProjectFlow() {
+    // No dialog, no prompt — straight into an empty editor. The project
+    // name is auto-generated behind the scenes purely so there's a
+    // project.json to write to; the user can rename it later by clicking
+    // the name in the header.
+    const result = await window.pywebview.api.new_project();
+    if (result.error) { alert(result.error); return; }
+    hydrateProject(result);
+  }
+
+  async function importVideo() {
+    statusEl.textContent = 'Importing…';
+    const result = await window.pywebview.api.import_video();
+    if (!result) { statusEl.textContent = ''; return; } // user cancelled the file dialog
+    if (result.error) { statusEl.textContent = 'Import error: ' + result.error; return; }
+    hydrateProject(result);
+    statusEl.textContent = '';
+  }
+
+  function startRenameProject() {
+    const currentName = headerTitleEl.textContent;
     const input = document.createElement('input');
     input.type = 'text';
-    input.placeholder = 'Project name';
-    modalBodyEl.appendChild(input);
-    setTimeout(() => input.focus(), 0);
+    input.className = 'header-title-input';
+    input.value = currentName;
+    headerTitleEl.replaceWith(input);
+    input.focus();
+    input.select();
 
-    const submit = async () => {
-      const name = input.value.trim();
-      if (!name) return;
-      hideModal();
-      const result = await window.pywebview.api.start_project(name);
-      if (!result) return; // user cancelled the file dialog
+    let committed = false;
+    const commit = async () => {
+      if (committed) return;
+      committed = true;
+      const newName = input.value.trim();
+      input.replaceWith(headerTitleEl);
+      if (!newName || newName === currentName) return;
+      const result = await window.pywebview.api.rename_project(newName);
       if (result.error) { alert(result.error); return; }
-      hydrateProject(result);
+      headerTitleEl.textContent = result.name;
     };
-    input.addEventListener('keydown', e => { if (e.key === 'Enter') submit(); });
-    modalConfirmEl.onclick = submit;
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Enter') input.blur();
+      if (e.key === 'Escape') { input.value = currentName; input.blur(); }
+    });
+    input.addEventListener('blur', commit);
   }
 
   async function openProjectFlow() {
@@ -544,6 +599,8 @@
   document.getElementById('back-btn').addEventListener('click', goBack);
   document.getElementById('new-project-btn').addEventListener('click', newProjectFlow);
   document.getElementById('open-project-btn').addEventListener('click', openProjectFlow);
+  headerTitleEl.addEventListener('click', startRenameProject);
+  document.getElementById('import-btn').addEventListener('click', importVideo);
   document.getElementById('cut-btn').addEventListener('click', cutScene);
   document.getElementById('transcribe-btn').addEventListener('click', transcribeVideo);
   document.getElementById('export-btn').addEventListener('click', async () => {
