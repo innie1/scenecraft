@@ -749,6 +749,8 @@
   }
 
   async function goBack() {
+    const leave = confirm('Leave this project and go back? Your work is saved automatically.');
+    if (!leave) return;
     await window.pywebview.api.save_project();
     showScreen('start');
   }

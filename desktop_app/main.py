@@ -9,6 +9,7 @@ import sys
 import os
 import re
 import json
+import hashlib
 import http.server
 import socketserver
 import threading
@@ -137,6 +138,26 @@ class Api:
         _ALLOWED_MEDIA_PATHS.add(path)
         return f"http://127.0.0.1:{self.media_port}/media?path={urllib.parse.quote(path, safe='')}"
 
+    def _playable_path(self, source: str) -> str:
+        """A file that plays fine in VLC can still fail to render at all
+        in the embedded browser if its codec isn't one Chromium decodes
+        natively (HEVC footage from phones/cameras is the common case).
+        Returns the original path when it's already browser-safe, or a
+        cached H.264/AAC proxy (generated once) when it isn't. Only ever
+        used for the <video> src — cut_scene/transcribe/export always
+        read `source` itself, at full original quality."""
+        try:
+            info = ffmpeg_ops.probe(source)
+        except Exception:
+            return source
+        if ffmpeg_ops.is_browser_playable(info):
+            return source
+        proxy_name = hashlib.sha1(source.encode("utf-8")).hexdigest() + ".mp4"
+        proxy_path = str(SCENECRAFT_ROOT / "_proxies" / proxy_name)
+        if not Path(proxy_path).exists():
+            ffmpeg_ops.make_browser_proxy(source, proxy_path)
+        return proxy_path
+
     def _tracks_payload(self):
         return [
             {
@@ -188,36 +209,46 @@ class Api:
         return {"path": None, "info": None, "project": self._project_payload()}
 
     def import_video(self):
-        """Opens the video picker and adds the result to the video track
-        (full length, at the end of whatever's already there), and makes
-        it the project's active source for cut/transcribe."""
+        """Opens the video picker (multi-select) and adds each result to
+        the video track, in order, at the end of whatever's already
+        there — picking several files stitches them together on the
+        timeline. The last one imported becomes the project's active
+        source for cut/transcribe."""
         if not self.project:
             return {"error": "No project loaded."}
         result = webview.windows[0].create_file_dialog(
             webview.OPEN_DIALOG,
-            file_types=("Video files (*.mp4;*.mov;*.mkv;*.avi)", "All files (*.*)"),
+            allow_multiple=True,
+            file_types=("Video files (*.mp4;*.mov;*.mkv;*.avi;*.webm)", "All files (*.*)"),
         )
         if not result:
             return None
-        source = result[0]
-        try:
-            info = ffmpeg_ops.probe(source)
-        except Exception as e:
-            return {"error": str(e)}
 
-        self.project.source_video = source
         video_track = self.project.track("video")
-        timeline_start = max((c.end_time for c in video_track.clips), default=0.0)
-        clip = project_state.Clip(
-            id=f"import_{len(video_track.clips) + 1}",
-            source_path=source,
-            in_point=0.0,
-            out_point=info["duration_seconds"],
-            start_time=timeline_start,
-        )
-        self.project.add_clip(clip, track="video")
+        last_info = None
+        for source in result:
+            try:
+                info = ffmpeg_ops.probe(source)
+            except Exception as e:
+                return {"error": f"Couldn't read {source}: {e}"}
+            last_info = info
+            self.project.source_video = source
+            timeline_start = max((c.end_time for c in video_track.clips), default=0.0)
+            clip = project_state.Clip(
+                id=f"import_{len(video_track.clips) + 1}",
+                source_path=source,
+                in_point=0.0,
+                out_point=info["duration_seconds"],
+                start_time=timeline_start,
+            )
+            self.project.add_clip(clip, track="video")
+
         self._save_project()
-        return {"path": self._media_url(source), "info": info, "project": self._project_payload()}
+        try:
+            playable = self._playable_path(self.project.source_video)
+        except Exception as e:
+            return {"error": f"Imported, but couldn't prepare it for preview: {e}"}
+        return {"path": self._media_url(playable), "info": last_info, "project": self._project_payload()}
 
     def add_audio_clip(self, start_time: float | None = None):
         """Opens an audio picker and adds the result to the audio track.
@@ -301,9 +332,11 @@ class Api:
         self.project_path = path
         try:
             info = ffmpeg_ops.probe(project.source_video)
+            playable = self._playable_path(project.source_video)
         except Exception:
             info = None
-        return {"path": self._media_url(project.source_video), "info": info, "project": self._project_payload()}
+            playable = project.source_video
+        return {"path": self._media_url(playable), "info": info, "project": self._project_payload()}
 
     def cut_scene(self, start: float, end: float):
         """Cuts [start, end) out of the source video into its own file and

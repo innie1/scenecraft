@@ -42,6 +42,10 @@ def probe(input_path: str) -> dict:
         (s for s in data.get("streams", []) if s.get("codec_type") == "video"),
         None,
     )
+    audio_stream = next(
+        (s for s in data.get("streams", []) if s.get("codec_type") == "audio"),
+        None,
+    )
     duration = float(data.get("format", {}).get("duration", 0))
 
     return {
@@ -50,7 +54,42 @@ def probe(input_path: str) -> dict:
         "height": video_stream.get("height") if video_stream else None,
         "fps": _parse_fps(video_stream.get("r_frame_rate")) if video_stream else None,
         "codec": video_stream.get("codec_name") if video_stream else None,
+        "audio_codec": audio_stream.get("codec_name") if audio_stream else None,
     }
+
+
+# Codecs a Chromium-based <video> element (WebView2, the browser this app
+# actually renders in) can decode natively. A file that plays fine in VLC
+# can still fail to render at all here if it's outside this set (common
+# with HEVC/H.265 phone/camera footage, or unusual audio codecs) — VLC
+# uses its own much broader software decoder stack; the embedded browser
+# doesn't. is_browser_playable()/make_browser_proxy() exist to paper over
+# that gap for *playback only* — cut/export always operate on the
+# original file, never the proxy.
+_BROWSER_SAFE_VIDEO_CODECS = {"h264", "vp8", "vp9", "av1"}
+_BROWSER_SAFE_AUDIO_CODECS = {"aac", "opus", "vorbis", "mp3", None}
+
+
+def is_browser_playable(info: dict) -> bool:
+    return info.get("codec") in _BROWSER_SAFE_VIDEO_CODECS and info.get("audio_codec") in _BROWSER_SAFE_AUDIO_CODECS
+
+
+def make_browser_proxy(input_path: str, output_path: str) -> str:
+    """Transcodes to H.264/AAC MP4 so the embedded browser can actually
+    play it. Only for preview/playback — never used for cut/export, which
+    always read the original file at its original quality."""
+    ffmpeg = _ffmpeg_path()
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        ffmpeg, "-y", "-i", input_path,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+        "-c:a", "aac", "-movflags", "+faststart",
+        output_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"Failed to create a playable proxy for {input_path}:\n{result.stderr}")
+    return output_path
 
 
 def _parse_fps(rate_str: str | None) -> float | None:
