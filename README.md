@@ -59,3 +59,17 @@ Use **whisper.cpp**, not openai-whisper (PyTorch). PyTorch alone adds
 600MB-1GB to the installer for no benefit here — whisper.cpp does the same
 transcription job in ~5-10MB plus a quantized model (75-500MB depending on
 size chosen). Target for v1: ~300-400MB installer using the "base" model.
+
+## Whisper testing note
+
+`core_engine/whisper_ops.py` uses pywhispercpp (whisper.cpp bindings, no
+PyTorch). Audio extraction and transcript search were tested directly
+against real speech and confirmed working. The full `transcribe()` call
+downloads model weights from huggingface.co on first run — this couldn't
+be verified in the sandbox this was built in (network restricted there),
+but will work normally on a real machine with internet access. Verify it
+once by running:
+
+```
+python -c "from core_engine import whisper_ops; print(whisper_ops.transcribe('some_video_with_speech.mp4'))"
+```
