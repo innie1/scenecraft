@@ -177,6 +177,47 @@ def _find_font_file() -> str | None:
     return None
 
 
+# Fixed render resolutions for each supported export frame — long edge
+# pinned to 1080/1920 so quality is consistent regardless of source
+# footage. "auto" (not in this dict) instead matches the first video
+# clip's own resolution, the original single-clip behavior.
+ASPECT_RATIOS = {
+    "16:9": (1920, 1080),
+    "9:16": (1080, 1920),
+    "1:1": (1080, 1080),
+    "4:5": (1080, 1350),
+    "4:3": (1440, 1080),
+}
+
+
+def resolve_canvas_size(aspect_ratio: str, ref_width: int | None, ref_height: int | None) -> tuple[int, int]:
+    if aspect_ratio in ASPECT_RATIOS:
+        return ASPECT_RATIOS[aspect_ratio]
+    return (ref_width or 1280, ref_height or 720)
+
+
+def _clip_effects_filter(effects: dict) -> str | None:
+    """Builds the ffmpeg filter chain for a clip's color adjustments, or
+    None if it has none set. Missing keys are neutral (0 brightness, 1
+    contrast/saturation) — an empty dict produces None, not a no-op eq=
+    call."""
+    if not effects:
+        return None
+    eq_params = []
+    if "brightness" in effects:
+        eq_params.append(f"brightness={effects['brightness']}")
+    if "contrast" in effects:
+        eq_params.append(f"contrast={effects['contrast']}")
+    if "saturation" in effects:
+        eq_params.append(f"saturation={effects['saturation']}")
+    parts = []
+    if eq_params:
+        parts.append("eq=" + ":".join(eq_params))
+    if effects.get("grayscale"):
+        parts.append("hue=s=0")
+    return ",".join(parts) if parts else None
+
+
 def export(project, output_path: str) -> str:
     """
     Composite a Project's tracks into one rendered file.
@@ -209,8 +250,7 @@ def export(project, output_path: str) -> str:
         raise ValueError("Cannot export: the video track has no clips.")
 
     ref_info = probe(video_clips[0].source_path)
-    width = ref_info["width"] or 1280
-    height = ref_info["height"] or 720
+    width, height = resolve_canvas_size(getattr(project, "aspect_ratio", "auto"), ref_info["width"], ref_info["height"])
     fps = ref_info["fps"] or 30
 
     inputs: list[list[str]] = []
@@ -239,8 +279,16 @@ def export(project, output_path: str) -> str:
 
         v_idx = add_input(["-i", clip.source_path])
         v_label, a_label = f"v{len(video_labels)}", f"a{len(audio_labels)}"
+        # Every clip is normalized to the canvas size, not just the "auto"
+        # case — concat requires matching dimensions across all inputs
+        # anyway, so this also fixes clips of genuinely different source
+        # resolutions being concatenated together.
+        effects_filter = _clip_effects_filter(getattr(clip, "effects", None) or {})
+        effects_stage = f",{effects_filter}" if effects_filter else ""
         filter_parts.append(
-            f"[{v_idx}:v]trim=start={clip.in_point}:end={clip.out_point},setpts=PTS-STARTPTS[{v_label}]"
+            f"[{v_idx}:v]trim=start={clip.in_point}:end={clip.out_point},setpts=PTS-STARTPTS{effects_stage},"
+            f"scale={width}:{height}:force_original_aspect_ratio=decrease,"
+            f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black[{v_label}]"
         )
         filter_parts.append(
             f"[{v_idx}:a]atrim=start={clip.in_point}:end={clip.out_point},asetpts=PTS-STARTPTS[{a_label}]"

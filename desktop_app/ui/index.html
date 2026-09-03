@@ -94,6 +94,14 @@
     position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
     color: var(--text-muted); font-size: 13px; pointer-events: none;
   }
+  .caption-overlay {
+    position: absolute; left: 0; right: 0; bottom: 12%; display: flex; justify-content: center;
+    pointer-events: none; padding: 0 24px;
+  }
+  .caption-overlay span {
+    background: rgba(0,0,0,0.65); color: #fff; padding: 6px 14px; border-radius: 4px;
+    font-size: 18px; line-height: 1.35; text-align: center; max-width: 100%; white-space: pre-wrap;
+  }
 
   .timeline-container { display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto; }
   .trim-controls { display: flex; gap: 10px; align-items: center; font-size: 13px; flex: 0 0 auto; }
@@ -112,6 +120,10 @@
   #settings-btn { width: 30px; height: 30px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
   #settings-btn svg { width: 16px; height: 16px; }
   .header-right { display: flex; gap: 8px; align-items: center; }
+  #aspect-ratio-select {
+    background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 6px 10px; font-size: 12px;
+  }
 
   .timeline-scroll {
     overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 8px;
@@ -237,6 +249,14 @@
       <h1 id="header-title">Scenecraft</h1>
     </div>
     <div class="header-right">
+      <select id="aspect-ratio-select" title="Export frame size">
+        <option value="auto">Auto (source)</option>
+        <option value="16:9">16:9 landscape</option>
+        <option value="9:16">9:16 portrait</option>
+        <option value="1:1">1:1 square</option>
+        <option value="4:5">4:5 portrait</option>
+        <option value="4:3">4:3 landscape</option>
+      </select>
       <button id="settings-btn" title="Settings">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="12" cy="12" r="3"></circle>
@@ -288,6 +308,7 @@
         <div class="preview-wrap">
           <video id="preview" controls></video>
           <div id="preview-empty" class="preview-empty">No video imported yet</div>
+          <div id="caption-overlay" class="caption-overlay"></div>
         </div>
 
         <div id="transcript-panel" class="transcript-panel" style="display:none;">
@@ -331,7 +352,7 @@
 
     <div class="composer-bar">
       <input id="composer-input" type="text"
-             placeholder='Type an edit, e.g. "cut the first 5 seconds", "add music", "search for fox", "export"' />
+             placeholder='Type an edit, e.g. "cut the first 5 seconds", "go to 1:23", "add captions", "export"' />
       <button id="composer-send" class="primary">Run</button>
       <span id="composer-status"></span>
     </div>
@@ -395,6 +416,7 @@
   const previewEl = document.getElementById('preview');
   const previewEmptyEl = document.getElementById('preview-empty');
   const previewWrapEl = document.querySelector('.preview-wrap');
+  const captionOverlayEl = document.getElementById('caption-overlay');
 
   // WebView2 (the native window this app actually runs in) frequently
   // doesn't paint a <video>'s first frame until playback has started at
@@ -412,6 +434,26 @@
       restore();
     }
   });
+
+  // Captions/text-track clips previously only showed up once you
+  // exported — the live preview just played the raw video with nothing
+  // overlaid. This mirrors that onto the preview itself: whichever
+  // text-track clip covers the current playhead gets shown, the same
+  // way it'll actually look burned in at export.
+  function updateCaptionOverlay() {
+    const textTrack = (currentTracks || []).find(t => t.kind === 'text');
+    const clips = textTrack ? textTrack.clips : [];
+    const t = previewEl.currentTime;
+    const active = clips.find(c => t >= c.start_time && t < c.end_time && c.label);
+    captionOverlayEl.innerHTML = '';
+    if (active) {
+      const span = document.createElement('span');
+      span.textContent = active.label;
+      captionOverlayEl.appendChild(span);
+    }
+  }
+  previewEl.addEventListener('timeupdate', updateCaptionOverlay);
+  previewEl.addEventListener('seeked', updateCaptionOverlay);
   const statusEl = document.getElementById('status');
   const timelineRulerEl = document.getElementById('timeline-ruler');
   const trackLaneEls = {
@@ -437,6 +479,7 @@
   const endInputEl = document.getElementById('end');
   const composerInputEl = document.getElementById('composer-input');
   const composerStatusEl = document.getElementById('composer-status');
+  const aspectRatioSelectEl = document.getElementById('aspect-ratio-select');
 
   let currentTranscript = [];
   let currentTracks = [];
@@ -541,6 +584,7 @@
       const track = currentTracks.find(t => t.kind === kind) || { clips: [] };
       renderTrackLane(kind, track.clips, widthPx);
     });
+    updateCaptionOverlay();
   }
 
   function startClipDrag(e, boxEl, clip, kind) {
@@ -643,6 +687,7 @@
     selectedClipId = null;
     renderTracks(project.tracks);
     currentScript = project.script || [];
+    aspectRatioSelectEl.value = project.aspect_ratio || 'auto';
 
     currentTranscript = project.transcript || [];
     transcriptSearchEl.value = '';
@@ -818,7 +863,7 @@
     composerInputEl.value = '';
     composerStatusEl.textContent = 'Working…';
 
-    const response = await window.pywebview.api.run_command(text, previewEl.currentTime || 0);
+    const response = await window.pywebview.api.run_command(text, previewEl.currentTime || 0, selectedClipId);
     if (!response) return;
     composerStatusEl.textContent = response.message || response.error || '';
 
@@ -839,6 +884,10 @@
       renderTranscript(response.result.matches);
       transcriptSearchEl.value = response.result.query;
       showPreviewPane('transcript');
+    }
+    if (response.action === 'seek' && response.result) {
+      showPreviewPane('video');
+      previewEl.currentTime = response.result.time;
     }
     refreshTracks();
   }
@@ -1035,6 +1084,11 @@
   document.getElementById('cut-btn').addEventListener('click', cutScene);
   document.getElementById('transcribe-btn').addEventListener('click', toggleTranscribe);
   document.getElementById('settings-btn').addEventListener('click', openSettingsFlow);
+  aspectRatioSelectEl.addEventListener('change', async () => {
+    const result = await window.pywebview.api.set_aspect_ratio(aspectRatioSelectEl.value);
+    if (result.error) { alert(result.error); return; }
+    statusEl.textContent = `Export frame set to ${aspectRatioSelectEl.value}.`;
+  });
   document.getElementById('composer-send').addEventListener('click', runComposerCommand);
   composerInputEl.addEventListener('keydown', e => { if (e.key === 'Enter') runComposerCommand(); });
   document.getElementById('export-btn').addEventListener('click', async () => {

@@ -27,6 +27,11 @@ class Clip:
     out_point: float
     start_time: float
     label: str = ""
+    # Color adjustments applied at export (see ffmpeg_ops.export). Keys:
+    # "brightness" (-1..1), "contrast" (0..3), "saturation" (0..3), each
+    # relative to ffmpeg's eq= neutral values (0, 1, 1); "grayscale" (bool).
+    # Missing keys mean untouched, not zero — an empty dict is a no-op.
+    effects: dict = field(default_factory=dict)
 
     @property
     def duration(self) -> float:
@@ -69,6 +74,7 @@ class Project:
     tracks: list[Track] = field(default_factory=_default_tracks)
     transcript: list[dict] = field(default_factory=list)
     script: list[ScriptScene] = field(default_factory=list)
+    aspect_ratio: str = "auto"  # "auto" | "16:9" | "9:16" | "1:1" | "4:5" | "4:3" — see ffmpeg_ops.ASPECT_RATIOS
     schema_version: int = SCHEMA_VERSION
 
     def track(self, kind: str) -> Track:
@@ -105,6 +111,7 @@ class Project:
             tracks=tracks,
             transcript=d.get("transcript", []),
             script=[ScriptScene(**s) for s in d.get("script", [])],
+            aspect_ratio=d.get("aspect_ratio", "auto"),
         )
 
     @classmethod

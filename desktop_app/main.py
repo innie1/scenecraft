@@ -218,6 +218,7 @@ class Api:
             "tracks": self._tracks_payload(),
             "transcript": self.project.transcript,
             "script": [vars(s) for s in self.project.script],
+            "aspect_ratio": self.project.aspect_ratio,
         }
 
     def _save_project(self):
@@ -328,6 +329,19 @@ class Api:
         self._save_project()
         return {"ok": True, "project": self._project_payload()}
 
+    def set_aspect_ratio(self, ratio: str):
+        """"auto" (the default) exports at the first video clip's own
+        resolution — matches "adjust to the first uploaded video". Any
+        other value pins export to a fixed canvas (see
+        ffmpeg_ops.ASPECT_RATIOS) with each clip letterboxed to fit."""
+        if not self.project:
+            return {"error": "No project loaded."}
+        if ratio != "auto" and ratio not in ffmpeg_ops.ASPECT_RATIOS:
+            return {"error": f"Unknown aspect ratio {ratio!r}."}
+        self.project.aspect_ratio = ratio
+        self._save_project()
+        return {"ok": True, "aspect_ratio": ratio}
+
     def rename_project(self, name: str):
         if not self.project:
             return {"error": "No project loaded."}
@@ -435,6 +449,69 @@ class Api:
         self._save_project()
         return {"ok": True, "start_time": clip.start_time}
 
+    # ---- color correction / effects (real ffmpeg eq= + hue=, no AI) ----
+    _EFFECT_BOUNDS = {
+        "brightness": (-1.0, 1.0, 0.0),
+        "contrast": (0.0, 3.0, 1.0),
+        "saturation": (0.0, 3.0, 1.0),
+    }
+
+    def _find_clip(self, clip_id: str):
+        if not self.project:
+            return None
+        for track in self.project.tracks:
+            for clip in track.clips:
+                if clip.id == clip_id:
+                    return clip
+        return None
+
+    def set_clip_effect(self, clip_id: str, effect: str, value):
+        if not self.project:
+            return {"error": "No project loaded."}
+        clip = self._find_clip(clip_id)
+        if not clip:
+            return {"error": f"Clip {clip_id!r} not found."}
+        if effect == "grayscale":
+            clip.effects["grayscale"] = bool(value)
+        elif effect in self._EFFECT_BOUNDS:
+            lo, hi, _ = self._EFFECT_BOUNDS[effect]
+            clip.effects[effect] = max(lo, min(hi, float(value)))
+        else:
+            return {"error": f"Unknown effect {effect!r}."}
+        self._save_project()
+        return {"ok": True, "effects": clip.effects, "project": self._project_payload()}
+
+    def reset_clip_effects(self, clip_id: str):
+        if not self.project:
+            return {"error": "No project loaded."}
+        clip = self._find_clip(clip_id)
+        if not clip:
+            return {"error": f"Clip {clip_id!r} not found."}
+        clip.effects = {}
+        self._save_project()
+        return {"ok": True, "project": self._project_payload()}
+
+    def _target_video_clips(self, selected_clip_id: str | None):
+        """Effect commands from the composer apply to the selected clip
+        if there is one, otherwise to every video clip — useful since
+        the common case is a single clip and selecting one first is
+        extra friction for no benefit."""
+        video_clips = self.project.track("video").clips
+        if selected_clip_id:
+            match = next((c for c in video_clips if c.id == selected_clip_id), None)
+            if match:
+                return [match]
+        return video_clips
+
+    def _adjust_effect(self, selected_clip_id: str | None, effect: str, delta: float) -> int:
+        lo, hi, default = self._EFFECT_BOUNDS[effect]
+        clips = self._target_video_clips(selected_clip_id)
+        for c in clips:
+            current = c.effects.get(effect, default)
+            c.effects[effect] = max(lo, min(hi, current + delta))
+        self._save_project()
+        return len(clips)
+
     def transcribe(self):
         if not self.project:
             return {"error": "No project loaded."}
@@ -518,7 +595,7 @@ class Api:
     # is not a general NLU/LLM, so unrecognized phrasing (e.g. "change the
     # color", "add effects" — there's no color/effects engine at all yet)
     # returns a clear "not supported" message instead of guessing.
-    def run_command(self, text: str, current_time: float = 0.0):
+    def run_command(self, text: str, current_time: float = 0.0, selected_clip_id: str | None = None):
         if not self.project:
             return {"error": "No project loaded."}
         raw = (text or "").strip()
@@ -567,6 +644,51 @@ class Api:
                 return {"action": "add_audio", "message": "Cancelled — no audio file selected.", "result": None}
             return {"action": "add_audio", "message": "Added audio clip." if "error" not in result else result["error"], "result": result}
 
+        # "go to 1:23" (mm:ss) — checked before the plain-seconds form below
+        m = re.search(r"\b(?:go to|take me to|jump to|seek to)\s+(\d+):(\d+)\b", t)
+        if m:
+            target = int(m.group(1)) * 60 + int(m.group(2))
+            return {"action": "seek", "message": f"Jumped to {m.group(1)}:{m.group(2)}.", "result": {"time": target}}
+
+        # "go to 90 seconds" / "take me to 45" / "jump to 12s"
+        m = re.search(r"\b(?:go to|take me to|jump to|seek to)\s+(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?\b", t)
+        if m:
+            target = num(m.group(1))
+            return {"action": "seek", "message": f"Jumped to {target:g}s.", "result": {"time": target}}
+
+        # color/effects — targets the selected clip if there is one,
+        # otherwise every video clip
+        if re.search(r"\b(?:brighter|brighten|increase brightness)\b", t):
+            n = self._adjust_effect(selected_clip_id, "brightness", 0.15)
+            return {"action": "effect", "message": f"Increased brightness on {n} clip(s).", "result": {"project": self._project_payload()}}
+        if re.search(r"\b(?:darker|darken|decrease brightness)\b", t):
+            n = self._adjust_effect(selected_clip_id, "brightness", -0.15)
+            return {"action": "effect", "message": f"Decreased brightness on {n} clip(s).", "result": {"project": self._project_payload()}}
+        if re.search(r"\b(?:more contrast|increase contrast)\b", t):
+            n = self._adjust_effect(selected_clip_id, "contrast", 0.2)
+            return {"action": "effect", "message": f"Increased contrast on {n} clip(s).", "result": {"project": self._project_payload()}}
+        if re.search(r"\b(?:less contrast|decrease contrast|flatten)\b", t):
+            n = self._adjust_effect(selected_clip_id, "contrast", -0.2)
+            return {"action": "effect", "message": f"Decreased contrast on {n} clip(s).", "result": {"project": self._project_payload()}}
+        if re.search(r"\b(?:more saturation|increase saturation|more vibrant|saturate)\b", t):
+            n = self._adjust_effect(selected_clip_id, "saturation", 0.3)
+            return {"action": "effect", "message": f"Increased saturation on {n} clip(s).", "result": {"project": self._project_payload()}}
+        if re.search(r"\b(?:less saturation|decrease saturation|desaturate)\b", t):
+            n = self._adjust_effect(selected_clip_id, "saturation", -0.3)
+            return {"action": "effect", "message": f"Decreased saturation on {n} clip(s).", "result": {"project": self._project_payload()}}
+        if re.search(r"\b(?:black and white|grayscale|greyscale)\b", t):
+            clips = self._target_video_clips(selected_clip_id)
+            for c in clips:
+                c.effects["grayscale"] = True
+            self._save_project()
+            return {"action": "effect", "message": f"Made {len(clips)} clip(s) black and white.", "result": {"project": self._project_payload()}}
+        if re.search(r"\b(?:reset (?:effects|color)|remove effects|clear effects)\b", t):
+            clips = self._target_video_clips(selected_clip_id)
+            for c in clips:
+                c.effects = {}
+            self._save_project()
+            return {"action": "effect", "message": f"Reset effects on {len(clips)} clip(s).", "result": {"project": self._project_payload()}}
+
         # "add captions" / "add subtitles" / "generate captions"
         if re.search(r"\b(?:add|generate)\s+(?:captions|subtitles)\b", t):
             result = self.generate_captions()
@@ -602,8 +724,9 @@ class Api:
             "error": (
                 f"Didn't recognize that command: {raw!r}. This composer only understands a fixed set of "
                 "phrasings (no AI interpretation, no network) — try things like \"cut the first 5 seconds\", "
-                "\"cut at 3 seconds\", \"add music\", \"transcribe\", \"search for fox\", or \"export\". "
-                "Things like color grading or effects aren't built yet at all, with or without an API key."
+                "\"cut at 3 seconds\", \"add music\", \"add captions\", \"go to 1:23\", \"brighter\"/\"darker\", "
+                "\"more contrast\"/\"less contrast\", \"more saturation\"/\"less saturation\", "
+                "\"black and white\", \"reset effects\", \"transcribe\", \"search for fox\", or \"export\"."
             )
         }
 
