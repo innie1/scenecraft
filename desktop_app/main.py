@@ -12,7 +12,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import webview
-from core_engine import ffmpeg_ops, project_state
+from core_engine import ffmpeg_ops, project_state, whisper_ops
 
 SCENECRAFT_ROOT = Path.home() / "Scenecraft"
 
@@ -29,6 +29,7 @@ class Api:
             "name": self.project.name,
             "source_video": self.project.source_video,
             "scenes": [vars(s) for s in self.project.scenes],
+            "transcript": self.project.transcript,
         }
 
     def _save_project(self):
@@ -128,6 +129,24 @@ class Api:
         if not self.project:
             return []
         return [vars(s) for s in self.project.scenes]
+
+    def transcribe(self):
+        if not self.project:
+            return {"error": "No project loaded. Pick a video first."}
+        try:
+            segments = whisper_ops.transcribe(self.project.source_video)
+        except Exception as e:
+            return {"error": str(e)}
+        self.project.transcript = segments
+        self._save_project()
+        return {"transcript": segments}
+
+    def search_transcript(self, query: str):
+        if not self.project:
+            return []
+        if not query or not query.strip():
+            return self.project.transcript
+        return whisper_ops.search_transcript(self.project.transcript, query)
 
 
 def main():

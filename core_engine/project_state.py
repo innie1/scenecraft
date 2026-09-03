@@ -23,6 +23,7 @@ class Project:
     name: str
     source_video: str
     scenes: list[Scene] = field(default_factory=list)
+    transcript: list[dict] = field(default_factory=list)
 
     def add_scene(self, scene: Scene) -> None:
         self.scenes.append(scene)
@@ -34,7 +35,12 @@ class Project:
     @classmethod
     def from_dict(cls, d: dict) -> "Project":
         scenes = [Scene(**s) for s in d.get("scenes", [])]
-        return cls(name=d["name"], source_video=d["source_video"], scenes=scenes)
+        return cls(
+            name=d["name"],
+            source_video=d["source_video"],
+            scenes=scenes,
+            transcript=d.get("transcript", []),
+        )
 
 
 def save(project: Project, path: str) -> None:
