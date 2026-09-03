@@ -7,6 +7,8 @@ directly — it always goes through this Api class.
 
 import sys
 import os
+import re
+import json
 import http.server
 import socketserver
 import threading
@@ -20,6 +22,7 @@ import webview
 from core_engine import ffmpeg_ops, project_state, whisper_ops
 
 SCENECRAFT_ROOT = Path.home() / "Scenecraft"
+SETTINGS_PATH = SCENECRAFT_ROOT / "settings.json"
 
 # WebView2 on Windows won't reliably play file:// video (no seeking, often
 # no rendering at all). Instead we serve video files ourselves over plain
@@ -216,6 +219,41 @@ class Api:
         self._save_project()
         return {"path": self._media_url(source), "info": info, "project": self._project_payload()}
 
+    def add_audio_clip(self, start_time: float | None = None):
+        """Opens an audio picker and adds the result to the audio track.
+        start_time=None appends after whatever's already there; a number
+        places it at that exact position (e.g. the composer's "add music
+        here" uses the current playhead)."""
+        if not self.project:
+            return {"error": "No project loaded."}
+        result = webview.windows[0].create_file_dialog(
+            webview.OPEN_DIALOG,
+            file_types=("Audio files (*.mp3;*.wav;*.m4a;*.aac;*.flac;*.ogg)", "All files (*.*)"),
+        )
+        if not result:
+            return None
+        source = result[0]
+        try:
+            info = ffmpeg_ops.probe(source)
+        except Exception as e:
+            return {"error": str(e)}
+
+        audio_track = self.project.track("audio")
+        placed_at = (
+            start_time if start_time is not None
+            else max((c.end_time for c in audio_track.clips), default=0.0)
+        )
+        clip = project_state.Clip(
+            id=f"audio_{len(audio_track.clips) + 1}",
+            source_path=source,
+            in_point=0.0,
+            out_point=info["duration_seconds"],
+            start_time=max(0.0, placed_at),
+        )
+        self.project.add_clip(clip, track="audio")
+        self._save_project()
+        return {"ok": True, "project": self._project_payload()}
+
     def rename_project(self, name: str):
         if not self.project:
             return {"error": "No project loaded."}
@@ -275,6 +313,14 @@ class Api:
             return {"error": "No project loaded."}
         if not self.project.source_video:
             return {"error": "Import a video first."}
+        if start < 0 or end <= start:
+            return {"error": f"Invalid range: start must be >= 0 and end must be after start (got {start}-{end})."}
+        try:
+            source_duration = ffmpeg_ops.probe(self.project.source_video)["duration_seconds"]
+        except Exception:
+            source_duration = None
+        if source_duration is not None and start >= source_duration:
+            return {"error": f"Start ({start}s) is at or past the video's length ({source_duration:.1f}s)."}
         video_track = self.project.track("video")
         out_dir = SCENECRAFT_ROOT / self.project.name / "scenes"
         scene_id = f"scene_{len(video_track.clips) + 1}"
@@ -349,6 +395,116 @@ class Api:
         except Exception as e:
             return {"error": str(e)}
         return {"path": out_path}
+
+    # ---- composer: local, offline pattern-matched commands ----
+    # No network, no API key. Recognizes a fixed set of phrasings and maps
+    # them onto the same Api methods the UI buttons already call — this
+    # is not a general NLU/LLM, so unrecognized phrasing (e.g. "change the
+    # color", "add effects" — there's no color/effects engine at all yet)
+    # returns a clear "not supported" message instead of guessing.
+    def run_command(self, text: str, current_time: float = 0.0):
+        if not self.project:
+            return {"error": "No project loaded."}
+        raw = (text or "").strip()
+        if not raw:
+            return {"error": "Type a command first."}
+        t = raw.lower()
+
+        def num(s: str) -> float:
+            return float(s)
+
+        # "cut the first N seconds"
+        m = re.search(r"\bcut\s+(?:the\s+)?first\s+(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?\b", t)
+        if m:
+            n = num(m.group(1))
+            result = self.cut_scene(0.0, n)
+            return {"action": "cut", "message": f"Cut the first {n:g}s." if "error" not in result else result["error"], "result": result}
+
+        # "cut the next N seconds" — relative to the current playhead
+        m = re.search(r"\bcut\s+(?:the\s+)?next\s+(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?\b", t)
+        if m:
+            n = num(m.group(1))
+            result = self.cut_scene(current_time, current_time + n)
+            return {"action": "cut", "message": f"Cut {n:g}s from {current_time:g}s." if "error" not in result else result["error"], "result": result}
+
+        # "cut from A to B" / "cut A to B" / "cut A-B"
+        m = re.search(r"\bcut\s+(?:from\s+)?(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?\s*(?:to|-|–)\s*(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?\b", t)
+        if m:
+            a, b = num(m.group(1)), num(m.group(2))
+            result = self.cut_scene(a, b)
+            return {"action": "cut", "message": f"Cut {a:g}s to {b:g}s." if "error" not in result else result["error"], "result": result}
+
+        # "cut at N (seconds)" — a single point only tells us where to
+        # start; cut N seconds from there, same as "cut the next N seconds"
+        m = re.search(r"\bcut\s+at\s+(\d+(?:\.\d+)?)\s*(?:s|sec|secs|seconds?)?\b", t)
+        if m:
+            n = num(m.group(1))
+            result = self.cut_scene(current_time, current_time + n)
+            return {"action": "cut", "message": f"Cut {n:g}s from {current_time:g}s." if "error" not in result else result["error"], "result": result}
+
+        # "add music" / "add audio" / "add a song" [here]
+        m = re.search(r"\badd\s+(?:a\s+|some\s+)?(?:music|audio|song)(?:\s+track)?\b(.*)$", t)
+        if m:
+            here = "here" in m.group(1)
+            result = self.add_audio_clip(current_time if here else None)
+            if result is None:
+                return {"action": "add_audio", "message": "Cancelled — no audio file selected.", "result": None}
+            return {"action": "add_audio", "message": "Added audio clip." if "error" not in result else result["error"], "result": result}
+
+        # "import a video" / "add a video"
+        if re.search(r"\bimport\b", t) or re.search(r"\badd\s+(?:a\s+)?video\b", t):
+            result = self.import_video()
+            if result is None:
+                return {"action": "import", "message": "Cancelled — no video selected.", "result": None}
+            return {"action": "import", "message": "Imported video." if "error" not in result else result["error"], "result": result}
+
+        # "transcribe" / "generate a transcript"
+        if re.search(r"\btranscribe\b", t) or re.search(r"\bgenerate\s+(?:a\s+)?transcript\b", t):
+            result = self.transcribe()
+            return {"action": "transcribe", "message": "Transcribed." if "error" not in result else result["error"], "result": result}
+
+        # "search for X" / "find X" / "find where I said X"
+        m = re.search(r"\b(?:search|find)\b(?:\s+for)?\s+(?:where\s+i\s+said\s+)?(.+)$", t)
+        if m:
+            query = m.group(1).strip(" \"'")
+            matches = self.search_transcript(query)
+            return {"action": "search", "message": f"Found {len(matches)} match(es) for {query!r}.", "result": {"query": query, "matches": matches}}
+
+        # "export"
+        if re.search(r"\bexport\b", t):
+            result = self.export_project()
+            if result is None:
+                return {"action": "export", "message": "Cancelled — no save location chosen.", "result": None}
+            return {"action": "export", "message": f"Exported to {result.get('path')}." if "error" not in result else result["error"], "result": result}
+
+        return {
+            "error": (
+                f"Didn't recognize that command: {raw!r}. This composer only understands a fixed set of "
+                "phrasings (no AI interpretation, no network) — try things like \"cut the first 5 seconds\", "
+                "\"cut at 3 seconds\", \"add music\", \"transcribe\", \"search for fox\", or \"export\". "
+                "Things like color grading or effects aren't built yet at all, with or without an API key."
+            )
+        }
+
+    # ---- settings: local-only storage, e.g. for a future API key ----
+    def get_settings(self):
+        if not SETTINGS_PATH.exists():
+            return {}
+        try:
+            return json.loads(SETTINGS_PATH.read_text())
+        except (OSError, json.JSONDecodeError):
+            return {}
+
+    def set_api_key(self, api_key: str):
+        """Stores an API key locally in ~/Scenecraft/settings.json. Nothing
+        in the app currently sends this anywhere — the composer's command
+        interpreter is fully local/offline (see run_command). This exists
+        so a key can be entered ahead of an AI-assisted mode being built."""
+        settings = self.get_settings()
+        settings["api_key"] = api_key.strip()
+        SCENECRAFT_ROOT.mkdir(parents=True, exist_ok=True)
+        SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
+        return {"ok": True}
 
 
 def main():

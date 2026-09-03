@@ -100,6 +100,19 @@
   .trim-controls input { width: 70px; background: var(--panel); border: 1px solid var(--border);
     color: var(--text); border-radius: 4px; padding: 5px 8px; }
 
+  /* Composer: local, offline pattern-matched edit commands */
+  .composer-bar { display: flex; gap: 8px; flex: 0 0 auto; }
+  #composer-input {
+    flex: 1; background: var(--panel); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 8px 12px; font-size: 13px;
+  }
+  #composer-input:focus { outline: none; border-color: var(--accent); }
+  #composer-status { flex: 0 0 auto; align-self: center; color: var(--text-muted); font-size: 12px; max-width: 260px; }
+
+  #settings-btn { width: 30px; height: 30px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
+  #settings-btn svg { width: 16px; height: 16px; }
+  .header-right { display: flex; gap: 8px; align-items: center; }
+
   .timeline-scroll {
     overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 8px;
     background: var(--panel);
@@ -196,7 +209,15 @@
       </button>
       <h1 id="header-title">Scenecraft</h1>
     </div>
-    <button id="export-btn" class="primary">Export</button>
+    <div class="header-right">
+      <button id="settings-btn" title="Settings">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="3"></circle>
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82A1.65 1.65 0 0 0 3 13.09H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+        </svg>
+      </button>
+      <button id="export-btn" class="primary">Export</button>
+    </div>
   </header>
 
   <main class="editor-main">
@@ -274,6 +295,13 @@
         </div>
       </div>
     </div>
+
+    <div class="composer-bar">
+      <input id="composer-input" type="text"
+             placeholder='Type an edit, e.g. "cut the first 5 seconds", "add music", "search for fox", "export"' />
+      <button id="composer-send" class="primary">Run</button>
+      <span id="composer-status"></span>
+    </div>
   </main>
 </div>
 
@@ -294,6 +322,23 @@
   const previewEl = document.getElementById('preview');
   const previewEmptyEl = document.getElementById('preview-empty');
   const previewWrapEl = document.querySelector('.preview-wrap');
+
+  // WebView2 (the native window this app actually runs in) frequently
+  // doesn't paint a <video>'s first frame until playback has started at
+  // least once — it just sits black even though readyState/videoWidth
+  // are already correct. A muted play()-then-immediate-pause() forces a
+  // real paint without an audible blip or a visible autoplay.
+  previewEl.addEventListener('loadeddata', () => {
+    const wasMuted = previewEl.muted;
+    previewEl.muted = true;
+    const playPromise = previewEl.play();
+    const restore = () => { previewEl.pause(); previewEl.muted = wasMuted; };
+    if (playPromise && typeof playPromise.then === 'function') {
+      playPromise.then(restore).catch(() => { previewEl.muted = wasMuted; });
+    } else {
+      restore();
+    }
+  });
   const statusEl = document.getElementById('status');
   const timelineRulerEl = document.getElementById('timeline-ruler');
   const trackLaneEls = {
@@ -314,6 +359,11 @@
   const modalBodyEl = document.getElementById('modal-body');
   const modalConfirmEl = document.getElementById('modal-confirm');
   const modalCancelEl = document.getElementById('modal-cancel');
+
+  const startInputEl = document.getElementById('start');
+  const endInputEl = document.getElementById('end');
+  const composerInputEl = document.getElementById('composer-input');
+  const composerStatusEl = document.getElementById('composer-status');
 
   let currentTranscript = [];
   let currentTracks = [];
@@ -478,6 +528,22 @@
       previewEmptyEl.style.display = 'flex';
     }
 
+    // The Start/End trim inputs used to default to a fixed 0-5 regardless
+    // of the actual video — confusing for anything shorter/longer than
+    // 5s. Tie them to the real source duration instead: End defaults to
+    // the full length (so a bare "Cut" with no adjustment cuts the whole
+    // clip), and both inputs are capped so you can't type past the end.
+    const duration = result.info && result.info.duration_seconds;
+    if (duration) {
+      startInputEl.max = duration;
+      endInputEl.max = duration;
+      startInputEl.value = 0;
+      endInputEl.value = duration;
+    } else {
+      startInputEl.removeAttribute('max');
+      endInputEl.removeAttribute('max');
+    }
+
     const project = result.project || {};
     headerTitleEl.textContent = project.name || 'Scenecraft';
     selectedClipId = null;
@@ -626,6 +692,62 @@
     renderTranscript(results);
   });
 
+  async function openSettingsFlow() {
+    const settings = await window.pywebview.api.get_settings();
+    showModal('Settings');
+
+    const label = document.createElement('label');
+    label.style.fontSize = '12px';
+    label.style.color = 'var(--text-muted)';
+    label.textContent = 'API key (stored locally only — nothing in the app sends this anywhere yet; this is a slot for an AI-assisted mode that isn’t built yet)';
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.placeholder = 'sk-...';
+    input.value = settings.api_key || '';
+    input.style.marginTop = '8px';
+    modalBodyEl.appendChild(label);
+    modalBodyEl.appendChild(input);
+    setTimeout(() => input.focus(), 0);
+
+    modalConfirmEl.textContent = 'Save';
+    modalConfirmEl.onclick = async () => {
+      await window.pywebview.api.set_api_key(input.value);
+      hideModal();
+      modalConfirmEl.textContent = 'Continue';
+    };
+  }
+
+  async function runComposerCommand() {
+    const text = composerInputEl.value.trim();
+    if (!text) return;
+    composerInputEl.value = '';
+    composerStatusEl.textContent = 'Working…';
+
+    const response = await window.pywebview.api.run_command(text, previewEl.currentTime || 0);
+    if (!response) return;
+    composerStatusEl.textContent = response.message || response.error || '';
+
+    if (response.error) return; // unrecognized or failed — nothing else changed
+
+    if (response.action === 'import' && response.result && response.result.path) {
+      hydrateProject(response.result);
+      return;
+    }
+    if (response.action === 'transcribe' && response.result && response.result.transcript) {
+      currentTranscript = response.result.transcript;
+      transcriptStatusEl.textContent = `${currentTranscript.length} segments`;
+      renderTranscript(currentTranscript);
+      transcribeBtnEl.classList.add('active');
+      showPreviewPane('transcript');
+    }
+    if (response.action === 'search' && response.result) {
+      renderTranscript(response.result.matches);
+      transcriptSearchEl.value = response.result.query;
+      showPreviewPane('transcript');
+    }
+    refreshTracks();
+  }
+
   async function goBack() {
     await window.pywebview.api.save_project();
     showScreen('start');
@@ -636,14 +758,22 @@
   document.getElementById('open-project-btn').addEventListener('click', openProjectFlow);
   headerTitleEl.addEventListener('click', startRenameProject);
   document.getElementById('import-btn').addEventListener('click', importVideo);
-  document.getElementById('audio-btn').addEventListener('click', () => {
-    statusEl.textContent = 'Adding audio clips is coming soon.';
+  document.getElementById('audio-btn').addEventListener('click', async () => {
+    statusEl.textContent = 'Adding audio…';
+    const result = await window.pywebview.api.add_audio_clip();
+    if (!result) { statusEl.textContent = ''; return; } // cancelled
+    if (result.error) { statusEl.textContent = 'Error: ' + result.error; return; }
+    statusEl.textContent = 'Added audio clip.';
+    refreshTracks();
   });
   document.getElementById('text-btn').addEventListener('click', () => {
     statusEl.textContent = 'Adding text clips is coming soon.';
   });
   document.getElementById('cut-btn').addEventListener('click', cutScene);
   document.getElementById('transcribe-btn').addEventListener('click', toggleTranscribe);
+  document.getElementById('settings-btn').addEventListener('click', openSettingsFlow);
+  document.getElementById('composer-send').addEventListener('click', runComposerCommand);
+  composerInputEl.addEventListener('keydown', e => { if (e.key === 'Enter') runComposerCommand(); });
   document.getElementById('export-btn').addEventListener('click', async () => {
     statusEl.textContent = 'Exporting…';
     const result = await window.pywebview.api.export_project();
