@@ -455,6 +455,46 @@ class Api:
             return self.project.transcript
         return whisper_ops.search_transcript(self.project.transcript, query)
 
+    def generate_captions(self):
+        """Turns the transcript into caption clips on the text track —
+        one per segment, positioned/timed to match, so export burns them
+        in via the existing drawtext pipeline. Transcribes first if that
+        hasn't run yet. Safely re-runnable: previously auto-generated
+        captions (id prefix "caption_") are replaced, not duplicated.
+
+        Known limitation: segment timestamps are relative to the original
+        source recording, not the edited timeline. This lines up
+        correctly for a source that hasn't been cut/rearranged yet;
+        captions generated after cutting will be out of sync with the
+        cut clips' new positions, since a cut clip doesn't carry where it
+        came from in the original — regenerate captions before cutting,
+        not after, until that's tracked."""
+        if not self.project:
+            return {"error": "No project loaded."}
+        if not self.project.transcript:
+            if not self.project.source_video:
+                return {"error": "Import a video first."}
+            try:
+                self.project.transcript = whisper_ops.transcribe(self.project.source_video)
+            except Exception as e:
+                return {"error": str(e)}
+
+        text_track = self.project.track("text")
+        text_track.clips = [c for c in text_track.clips if not c.id.startswith("caption_")]
+        for i, seg in enumerate(self.project.transcript):
+            text_track.clips.append(project_state.Clip(
+                id=f"caption_{i + 1}",
+                source_path="",
+                in_point=0.0,
+                out_point=seg["end"] - seg["start"],
+                start_time=seg["start"],
+                label=seg["text"],
+            ))
+        text_track.clips.sort(key=lambda c: c.start_time)
+
+        self._save_project()
+        return {"ok": True, "count": len(self.project.transcript), "project": self._project_payload()}
+
     def export_project(self):
         if not self.project:
             return {"error": "No project loaded."}
@@ -526,6 +566,11 @@ class Api:
             if result is None:
                 return {"action": "add_audio", "message": "Cancelled — no audio file selected.", "result": None}
             return {"action": "add_audio", "message": "Added audio clip." if "error" not in result else result["error"], "result": result}
+
+        # "add captions" / "add subtitles" / "generate captions"
+        if re.search(r"\b(?:add|generate)\s+(?:captions|subtitles)\b", t):
+            result = self.generate_captions()
+            return {"action": "captions", "message": f"Added {result.get('count', 0)} caption(s)." if "error" not in result else result["error"], "result": result}
 
         # "import a video" / "add a video"
         if re.search(r"\bimport\b", t) or re.search(r"\badd\s+(?:a\s+)?video\b", t):

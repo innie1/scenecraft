@@ -134,6 +134,33 @@ def _escape_drawtext(text: str) -> str:
     return text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
 
 
+def _wrap_caption_text(text: str, video_width: int, fontsize: int) -> str:
+    """drawtext doesn't auto-wrap — a long caption just runs off both
+    edges of the frame. Greedy word-wrap to roughly fit the frame width,
+    using ~0.55*fontsize as a rough average glyph width (good enough for
+    typical fonts; drawtext still centers/sizes the box from the actual
+    rendered text, this only decides where line breaks go)."""
+    avg_char_width = fontsize * 0.55
+    max_chars_per_line = max(10, int((video_width * 0.9) / avg_char_width))
+
+    words = text.split()
+    lines: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for word in words:
+        added_len = len(word) + (1 if current else 0)
+        if current and current_len + added_len > max_chars_per_line:
+            lines.append(" ".join(current))
+            current = [word]
+            current_len = len(word)
+        else:
+            current.append(word)
+            current_len += added_len
+    if current:
+        lines.append(" ".join(current))
+    return "\n".join(lines)
+
+
 _FONT_CANDIDATES = [
     r"C:\Windows\Fonts\arial.ttf",
     r"C:\Windows\Fonts\segoeui.ttf",
@@ -255,14 +282,16 @@ def export(project, output_path: str) -> str:
                 "No usable font file found for text overlays "
                 f"(checked: {', '.join(_FONT_CANDIDATES)})."
             )
+        fontsize = 36
         for i, clip in enumerate(text_track.clips):
             if not clip.label:
                 continue
             next_label = f"txt{i}"
-            text = _escape_drawtext(clip.label)
+            wrapped = _wrap_caption_text(clip.label, width, fontsize)
+            text = _escape_drawtext(wrapped)
             filter_parts.append(
-                f"[{final_video_label}]drawtext=fontfile='{font_file}':text='{text}':fontcolor=white:fontsize=36:"
-                f"box=1:boxcolor=black@0.5:boxborderw=8:x=(w-text_w)/2:y=h-th-40:"
+                f"[{final_video_label}]drawtext=fontfile='{font_file}':text='{text}':fontcolor=white:fontsize={fontsize}:"
+                f"box=1:boxcolor=black@0.5:boxborderw=8:x=(w-text_w)/2:y=h-th-40:line_spacing=4:"
                 f"enable='between(t,{clip.start_time},{clip.end_time})'[{next_label}]"
             )
             final_video_label = next_label
