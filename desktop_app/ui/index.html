@@ -180,6 +180,10 @@
     width: 100%; background: var(--bg); border: 1px solid var(--border); color: var(--text);
     border-radius: 6px; padding: 8px 10px; font-size: 13px;
   }
+  .modal textarea {
+    width: 100%; min-height: 220px; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+    border-radius: 6px; padding: 8px 10px; font-size: 13px; font-family: inherit; resize: vertical;
+  }
   .modal-actions { display: flex; justify-content: flex-end; gap: 8px; }
   .modal-body { overflow-y: auto; }
   .project-list { display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow-y: auto; }
@@ -187,6 +191,29 @@
     padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 13px;
   }
   .project-row:hover { border-color: var(--accent); }
+
+  /* ---------- Screen 3: guided recording ---------- */
+  .recording-main {
+    flex: 1; display: flex; flex-direction: column; padding: 16px 20px; gap: 16px;
+    overflow: hidden; min-height: 0;
+  }
+  .recording-camera-wrap {
+    position: relative; flex: 1; min-height: 0; background: #000; border-radius: 8px; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .recording-camera-wrap video { width: 100%; height: 100%; object-fit: cover; }
+  .recording-indicator {
+    position: absolute; top: 12px; left: 12px; background: rgba(220,60,60,0.9); color: #fff;
+    padding: 4px 10px; border-radius: 4px; font-size: 12px; font-weight: 600; letter-spacing: 0.02em;
+  }
+  .teleprompter {
+    flex: 0 0 auto; background: var(--panel-raised); border: 1px solid var(--border); border-radius: 8px;
+    padding: 18px 24px; text-align: center;
+  }
+  .teleprompter-scene-label { font-size: 12px; color: var(--text-muted); margin-bottom: 10px; }
+  .teleprompter-direction { font-size: 13px; color: var(--accent); font-style: italic; margin-bottom: 10px; }
+  .teleprompter-text { font-size: 22px; line-height: 1.45; }
+  .recording-controls { flex: 0 0 auto; display: flex; justify-content: center; align-items: center; gap: 10px; }
 </style>
 </head>
 <body>
@@ -223,6 +250,12 @@
   <main class="editor-main">
     <div class="editor-top">
       <div class="tool-rail-vertical">
+        <button id="script-btn" class="icon-btn" title="Script &amp; guided recording">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polygon points="23 7 16 12 23 17 23 7"></polygon>
+            <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+          </svg>
+        </button>
         <button id="import-btn" class="icon-btn" title="Import video">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
@@ -305,6 +338,46 @@
   </main>
 </div>
 
+<div id="recording-screen" class="screen recording-screen" style="display:none;">
+  <header>
+    <div class="header-left">
+      <button id="recording-exit-btn" title="Exit recording mode">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="19" y1="12" x2="5" y2="12"></line>
+          <polyline points="12 19 5 12 12 5"></polyline>
+        </svg>
+      </button>
+      <h1>Recording</h1>
+    </div>
+    <div class="header-right">
+      <button id="edit-script-btn">Edit script</button>
+      <span id="recording-progress" class="status-text"></span>
+    </div>
+  </header>
+
+  <main class="recording-main">
+    <div class="recording-camera-wrap">
+      <video id="camera-preview" autoplay muted playsinline></video>
+      <div id="recording-indicator" class="recording-indicator" style="display:none;">● REC</div>
+    </div>
+
+    <div class="teleprompter">
+      <div class="teleprompter-scene-label">Scene <span id="scene-number"></span> of <span id="scene-total"></span></div>
+      <div id="teleprompter-direction" class="teleprompter-direction"></div>
+      <div id="teleprompter-text" class="teleprompter-text"></div>
+    </div>
+
+    <div class="recording-controls">
+      <button id="prev-scene-btn">‹ Previous</button>
+      <button id="record-btn" class="primary">● Record</button>
+      <button id="stop-btn" style="display:none;">Stop</button>
+      <button id="retake-btn" style="display:none;">Retake</button>
+      <button id="use-take-btn" class="primary" style="display:none;">Use this take</button>
+      <button id="next-scene-btn">Next ›</button>
+    </div>
+  </main>
+</div>
+
 <div id="modal-overlay" class="modal-overlay">
   <div class="modal">
     <h2 id="modal-title"></h2>
@@ -367,13 +440,34 @@
 
   let currentTranscript = [];
   let currentTracks = [];
+  let currentScript = [];
   let selectedClipId = null;
   let dragState = null;
   const PX_PER_SEC = 30;
 
+  const recordingScreenEl = document.getElementById('recording-screen');
+  const cameraPreviewEl = document.getElementById('camera-preview');
+  const recordingIndicatorEl = document.getElementById('recording-indicator');
+  const sceneNumberEl = document.getElementById('scene-number');
+  const sceneTotalEl = document.getElementById('scene-total');
+  const teleprompterTextEl = document.getElementById('teleprompter-text');
+  const teleprompterDirectionEl = document.getElementById('teleprompter-direction');
+  const recordingProgressEl = document.getElementById('recording-progress');
+  const recordBtnEl = document.getElementById('record-btn');
+  const stopBtnEl = document.getElementById('stop-btn');
+  const retakeBtnEl = document.getElementById('retake-btn');
+  const useTakeBtnEl = document.getElementById('use-take-btn');
+
+  let cameraStream = null;
+  let mediaRecorder = null;
+  let recordedChunks = [];
+  let pendingTakeBlob = null;
+  let currentSceneIndex = 0;
+
   function showScreen(name) {
     startScreenEl.style.display = name === 'start' ? 'flex' : 'none';
     editorScreenEl.style.display = name === 'editor' ? 'flex' : 'none';
+    recordingScreenEl.style.display = name === 'recording' ? 'flex' : 'none';
   }
 
   function showModal(title) {
@@ -548,6 +642,7 @@
     headerTitleEl.textContent = project.name || 'Scenecraft';
     selectedClipId = null;
     renderTracks(project.tracks);
+    currentScript = project.script || [];
 
     currentTranscript = project.transcript || [];
     transcriptSearchEl.value = '';
@@ -748,6 +843,167 @@
     refreshTracks();
   }
 
+  // ---- guided recording: script -> teleprompter -> per-scene capture ----
+
+  function openScriptFlow() {
+    if (currentScript && currentScript.length) {
+      // already have a script from an earlier session — resume straight
+      // into recording rather than asking to paste it again
+      enterRecordingMode();
+      return;
+    }
+    showScriptModal();
+  }
+
+  function showScriptModal() {
+    showModal(currentScript && currentScript.length ? 'Edit script' : 'Add your script');
+    const hint = document.createElement('p');
+    hint.style.cssText = 'font-size:12px;color:var(--text-muted);margin:0 0 8px;';
+    hint.textContent = 'Separate scenes with a blank line, or label them "Scene 1:", "Scene 2:". Put acting notes in [brackets].';
+    const textarea = document.createElement('textarea');
+    textarea.placeholder = 'Scene 1:\n[smile, look at camera]\nHi everyone, welcome back...\n\nScene 2:\nToday we\'re going to...';
+    modalBodyEl.appendChild(hint);
+    modalBodyEl.appendChild(textarea);
+    setTimeout(() => textarea.focus(), 0);
+
+    modalConfirmEl.textContent = 'Save & start recording';
+    modalConfirmEl.onclick = async () => {
+      const text = textarea.value.trim();
+      if (!text) return;
+      const result = await window.pywebview.api.set_script(text);
+      if (result.error) { alert(result.error); return; }
+      hideModal();
+      modalConfirmEl.textContent = 'Continue';
+      currentScript = result.script;
+      enterRecordingMode();
+    };
+  }
+
+  function enterRecordingMode() {
+    currentSceneIndex = 0;
+    showScreen('recording');
+    renderCurrentScene();
+    startCamera();
+  }
+
+  async function startCamera() {
+    try {
+      cameraStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      cameraPreviewEl.muted = true;
+      cameraPreviewEl.srcObject = cameraStream;
+    } catch (e) {
+      alert('Could not access the camera/microphone: ' + e.message);
+    }
+  }
+
+  function stopCamera() {
+    if (cameraStream) {
+      cameraStream.getTracks().forEach(t => t.stop());
+      cameraStream = null;
+    }
+  }
+
+  function resetTakePreview() {
+    pendingTakeBlob = null;
+    cameraPreviewEl.controls = false;
+    cameraPreviewEl.muted = true;
+    cameraPreviewEl.removeAttribute('src');
+    cameraPreviewEl.srcObject = cameraStream;
+  }
+
+  function renderCurrentScene() {
+    const scene = currentScript[currentSceneIndex];
+    if (!scene) return;
+    sceneNumberEl.textContent = currentSceneIndex + 1;
+    sceneTotalEl.textContent = currentScript.length;
+    teleprompterTextEl.textContent = scene.text || '(no line for this scene — see direction)';
+    teleprompterDirectionEl.textContent = scene.direction || '';
+    teleprompterDirectionEl.style.display = scene.direction ? 'block' : 'none';
+    const recordedCount = currentScript.filter(s => s.recorded_path).length;
+    recordingProgressEl.textContent = `${recordedCount} / ${currentScript.length} recorded`;
+
+    recordBtnEl.style.display = '';
+    stopBtnEl.style.display = 'none';
+    retakeBtnEl.style.display = scene.recorded_path ? '' : 'none';
+    useTakeBtnEl.style.display = 'none';
+    document.getElementById('prev-scene-btn').disabled = currentSceneIndex === 0;
+    document.getElementById('next-scene-btn').disabled = currentSceneIndex === currentScript.length - 1;
+  }
+
+  function startRecordingTake() {
+    if (!cameraStream) { alert('Camera not ready yet.'); return; }
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(cameraStream);
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) recordedChunks.push(e.data); };
+    mediaRecorder.onstop = onTakeStopped;
+    mediaRecorder.start();
+    recordingIndicatorEl.style.display = '';
+    recordBtnEl.style.display = 'none';
+    stopBtnEl.style.display = '';
+  }
+
+  function stopRecordingTake() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+    recordingIndicatorEl.style.display = 'none';
+  }
+
+  function onTakeStopped() {
+    stopBtnEl.style.display = 'none';
+    retakeBtnEl.style.display = '';
+    useTakeBtnEl.style.display = '';
+    pendingTakeBlob = new Blob(recordedChunks, { type: 'video/webm' });
+    cameraPreviewEl.srcObject = null;
+    cameraPreviewEl.src = URL.createObjectURL(pendingTakeBlob);
+    cameraPreviewEl.muted = false;
+    cameraPreviewEl.controls = true;
+    cameraPreviewEl.play();
+  }
+
+  async function useTake() {
+    const scene = currentScript[currentSceneIndex];
+    if (!pendingTakeBlob || !scene) return;
+    const slot = await window.pywebview.api.create_upload_slot(scene.id);
+    if (slot.error) { alert(slot.error); return; }
+
+    useTakeBtnEl.disabled = true;
+    useTakeBtnEl.textContent = 'Uploading…';
+    try {
+      const uploadResp = await fetch(slot.upload_url, { method: 'POST', body: pendingTakeBlob });
+      const uploadJson = await uploadResp.json();
+      if (!uploadJson.ok) throw new Error('upload failed');
+
+      const result = await window.pywebview.api.finish_scene_recording(scene.id, uploadJson.path);
+      if (result.error) { alert(result.error); return; }
+      currentScript = result.project.script;
+      resetTakePreview();
+      if (currentSceneIndex < currentScript.length - 1) currentSceneIndex++;
+      renderCurrentScene();
+    } catch (e) {
+      alert('Could not save that take: ' + e.message);
+    } finally {
+      useTakeBtnEl.disabled = false;
+      useTakeBtnEl.textContent = 'Use this take';
+    }
+  }
+
+  function goToScene(delta) {
+    const next = currentSceneIndex + delta;
+    if (next < 0 || next >= currentScript.length) return;
+    currentSceneIndex = next;
+    resetTakePreview();
+    renderCurrentScene();
+  }
+
+  async function exitRecordingMode() {
+    const leave = confirm('Exit recording mode? Recorded takes are already saved on the timeline; anything not recorded yet stays pending — resume anytime.');
+    if (!leave) return;
+    stopRecordingTake();
+    stopCamera();
+    resetTakePreview();
+    showScreen('editor');
+    refreshTracks();
+  }
+
   async function goBack() {
     const leave = confirm('Leave this project and go back? Your work is saved automatically.');
     if (!leave) return;
@@ -759,6 +1015,7 @@
   document.getElementById('new-project-btn').addEventListener('click', newProjectFlow);
   document.getElementById('open-project-btn').addEventListener('click', openProjectFlow);
   headerTitleEl.addEventListener('click', startRenameProject);
+  document.getElementById('script-btn').addEventListener('click', openScriptFlow);
   document.getElementById('import-btn').addEventListener('click', importVideo);
   document.getElementById('audio-btn').addEventListener('click', async () => {
     statusEl.textContent = 'Adding audio…';
@@ -786,6 +1043,15 @@
     }
     statusEl.textContent = 'Exported to ' + result.path;
   });
+
+  document.getElementById('recording-exit-btn').addEventListener('click', exitRecordingMode);
+  document.getElementById('edit-script-btn').addEventListener('click', showScriptModal);
+  document.getElementById('record-btn').addEventListener('click', startRecordingTake);
+  document.getElementById('stop-btn').addEventListener('click', stopRecordingTake);
+  document.getElementById('retake-btn').addEventListener('click', () => { resetTakePreview(); renderCurrentScene(); });
+  document.getElementById('use-take-btn').addEventListener('click', useTake);
+  document.getElementById('prev-scene-btn').addEventListener('click', () => goToScene(-1));
+  document.getElementById('next-scene-btn').addEventListener('click', () => goToScene(1));
 
   showScreen('start');
 </script>

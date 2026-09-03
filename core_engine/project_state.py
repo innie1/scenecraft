@@ -52,11 +52,23 @@ def _default_tracks() -> list[Track]:
 
 
 @dataclass
+class ScriptScene:
+    """One scene in the guided-recording script: what to say, optional
+    acting/direction notes, and the recording once captured (None until
+    then — recording can span multiple sessions/days)."""
+    id: str
+    text: str
+    direction: str = ""
+    recorded_path: str | None = None
+
+
+@dataclass
 class Project:
     name: str
     source_video: str
     tracks: list[Track] = field(default_factory=_default_tracks)
     transcript: list[dict] = field(default_factory=list)
+    script: list[ScriptScene] = field(default_factory=list)
     schema_version: int = SCHEMA_VERSION
 
     def track(self, kind: str) -> Track:
@@ -92,6 +104,7 @@ class Project:
             source_video=d["source_video"],
             tracks=tracks,
             transcript=d.get("transcript", []),
+            script=[ScriptScene(**s) for s in d.get("script", [])],
         )
 
     @classmethod

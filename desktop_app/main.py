@@ -9,6 +9,7 @@ import sys
 import os
 import re
 import json
+import uuid
 import hashlib
 import http.server
 import socketserver
@@ -20,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import webview
-from core_engine import ffmpeg_ops, project_state, whisper_ops
+from core_engine import ffmpeg_ops, project_state, whisper_ops, script_ops
 
 SCENECRAFT_ROOT = Path.home() / "Scenecraft"
 SETTINGS_PATH = SCENECRAFT_ROOT / "settings.json"
@@ -33,6 +34,14 @@ SETTINGS_PATH = SCENECRAFT_ROOT / "settings.json"
 # file server just because it's bound to 127.0.0.1.
 _ALLOWED_MEDIA_PATHS: set[str] = set()
 
+# One-time upload slots for the guided-recording flow: the browser
+# MediaRecorder produces a Blob in JS and POSTs it straight to this
+# server (rather than round-tripping through the JSON pywebview bridge,
+# which is a poor fit for tens-of-MB video). A token maps to exactly one
+# server-chosen destination path — the client never gets to choose where
+# a POST writes, only which pre-registered slot it fills.
+_UPLOAD_TOKENS: dict[str, str] = {}
+
 
 class _RangeRequestHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -43,6 +52,39 @@ class _RangeRequestHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self._serve(send_body=True)
+
+    def do_POST(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/upload":
+            self.send_error(404, "Not found")
+            return
+        query = urllib.parse.parse_qs(parsed.query)
+        token = query.get("token", [None])[0]
+        dest = _UPLOAD_TOKENS.pop(token, None) if token else None
+        if not dest:
+            self.send_error(403, "Invalid or already-used upload token")
+            return
+
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        content_length = int(self.headers.get("Content-Length", 0))
+        with open(dest_path, "wb") as f:
+            remaining = content_length
+            chunk_size = 256 * 1024
+            while remaining > 0:
+                chunk = self.rfile.read(min(chunk_size, remaining))
+                if not chunk:
+                    break
+                f.write(chunk)
+                remaining -= len(chunk)
+
+        body = json.dumps({"ok": True, "path": str(dest_path)}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(body)
 
     def _serve(self, send_body: bool):
         parsed = urllib.parse.urlparse(self.path)
@@ -175,6 +217,7 @@ class Api:
             "source_video": self.project.source_video,
             "tracks": self._tracks_payload(),
             "transcript": self.project.transcript,
+            "script": [vars(s) for s in self.project.script],
         }
 
     def _save_project(self):
@@ -538,6 +581,69 @@ class Api:
         SCENECRAFT_ROOT.mkdir(parents=True, exist_ok=True)
         SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
         return {"ok": True}
+
+    # ---- guided recording: script -> scenes -> teleprompter -> capture ----
+    def set_script(self, raw_text: str):
+        """Parses a pasted script into scenes (deterministic text parsing,
+        see core_engine/script_ops.py — no AI). Replaces any existing
+        script; already-recorded takes for scenes that still exist by id
+        would be preserved by a real diff, but a fresh parse always
+        produces fresh scene ids, so re-pasting a script starts recording
+        over. That's intentional: editing the script mid-shoot should be
+        a deliberate reset, not a silent partial merge."""
+        if not self.project:
+            return {"error": "No project loaded."}
+        scenes = script_ops.parse_script(raw_text)
+        if not scenes:
+            return {"error": "Couldn't find any scenes in that script. Separate scenes with a blank line, or label them 'Scene 1:', 'Scene 2:', etc."}
+        self.project.script = [project_state.ScriptScene(**s) for s in scenes]
+        self._save_project()
+        return {"ok": True, "script": [vars(s) for s in self.project.script]}
+
+    def create_upload_slot(self, scene_id: str):
+        """Registers a one-time destination for the next recording
+        upload and returns the URL to POST it to. See _UPLOAD_TOKENS."""
+        if not self.project:
+            return {"error": "No project loaded."}
+        token = uuid.uuid4().hex
+        dest_path = str(SCENECRAFT_ROOT / self.project.name / "recordings" / f"{scene_id}_{token[:8]}.webm")
+        _UPLOAD_TOKENS[token] = dest_path
+        return {"upload_url": f"http://127.0.0.1:{self.media_port}/upload?token={token}"}
+
+    def finish_scene_recording(self, scene_id: str, file_path: str):
+        """Called once the browser has finished POSTing a take to the
+        upload slot above. Marks the scene recorded and places the
+        capture on the video track (full length, appended), immediately
+        editable the same as any imported clip."""
+        if not self.project:
+            return {"error": "No project loaded."}
+        try:
+            info = ffmpeg_ops.probe(file_path)
+        except Exception as e:
+            return {"error": str(e)}
+
+        for scene in self.project.script:
+            if scene.id == scene_id:
+                scene.recorded_path = file_path
+                break
+
+        video_track = self.project.track("video")
+        timeline_start = max((c.end_time for c in video_track.clips), default=0.0)
+        clip = project_state.Clip(
+            id=f"rec_{scene_id}",
+            source_path=file_path,
+            in_point=0.0,
+            out_point=info["duration_seconds"],
+            start_time=timeline_start,
+        )
+        self.project.add_clip(clip, track="video")
+        self._save_project()
+
+        try:
+            playable = self._playable_path(file_path)
+        except Exception:
+            playable = file_path
+        return {"ok": True, "preview_path": self._media_url(playable), "project": self._project_payload()}
 
 
 def main():
