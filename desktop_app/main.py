@@ -36,6 +36,13 @@ class Api:
         if self.project and self.project_path:
             project_state.save(self.project, self.project_path)
 
+    def save_project(self):
+        """Explicit save, used by the editor's back button before it
+        navigates away — mirrors the auto-save that already runs after
+        cut_scene/transcribe, as a safety net."""
+        self._save_project()
+        return {"ok": True}
+
     def pick_video_file(self):
         """Quick, unnamed open — used by the plain 'Open video' entry point.
         Not persisted to disk; use start_project() to create a saved project."""
