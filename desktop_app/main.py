@@ -22,13 +22,22 @@ class Api:
         self.project: project_state.Project | None = None
         self.project_path: str | None = None
 
+    def _tracks_payload(self):
+        return [
+            {
+                "kind": t.kind,
+                "clips": [vars(c) | {"duration": c.duration, "end_time": c.end_time} for c in t.clips],
+            }
+            for t in self.project.tracks
+        ]
+
     def _project_payload(self):
         if not self.project:
             return None
         return {
             "name": self.project.name,
             "source_video": self.project.source_video,
-            "scenes": [vars(s) for s in self.project.scenes],
+            "tracks": self._tracks_payload(),
             "transcript": self.project.transcript,
         }
 
@@ -116,26 +125,48 @@ class Api:
         return {"path": project.source_video, "info": info, "project": self._project_payload()}
 
     def cut_scene(self, start: float, end: float):
+        """Cuts [start, end) out of the source video into its own file and
+        places it as a new clip on the video track, appended after
+        whatever's already there."""
         if not self.project:
             return {"error": "No project loaded. Pick a video first."}
+        video_track = self.project.track("video")
         out_dir = SCENECRAFT_ROOT / self.project.name / "scenes"
-        scene_id = f"scene_{len(self.project.scenes) + 1}"
+        scene_id = f"scene_{len(video_track.clips) + 1}"
         out_path = str(out_dir / f"{scene_id}.mp4")
         try:
             ffmpeg_ops.cut_clip(self.project.source_video, out_path, start, end)
         except Exception as e:
             return {"error": str(e)}
-        scene = project_state.Scene(
-            id=scene_id, source_path=out_path, start=start, end=end
+
+        timeline_start = max((c.end_time for c in video_track.clips), default=0.0)
+        clip = project_state.Clip(
+            id=scene_id,
+            source_path=out_path,
+            in_point=0.0,
+            out_point=end - start,
+            start_time=timeline_start,
         )
-        self.project.add_scene(scene)
+        self.project.add_clip(clip, track="video")
         self._save_project()
         return {"scene_id": scene_id, "path": out_path}
 
-    def get_scenes(self):
+    def get_tracks(self):
         if not self.project:
             return []
-        return [vars(s) for s in self.project.scenes]
+        return self._tracks_payload()
+
+    def move_clip(self, track_kind: str, clip_id: str, start_time: float):
+        if not self.project:
+            return {"error": "No project loaded."}
+        track = self.project.track(track_kind)
+        clip = next((c for c in track.clips if c.id == clip_id), None)
+        if not clip:
+            return {"error": f"Clip {clip_id!r} not found on track {track_kind!r}."}
+        clip.start_time = max(0.0, start_time)
+        track.clips.sort(key=lambda c: c.start_time)
+        self._save_project()
+        return {"ok": True, "start_time": clip.start_time}
 
     def transcribe(self):
         if not self.project:
@@ -154,6 +185,23 @@ class Api:
         if not query or not query.strip():
             return self.project.transcript
         return whisper_ops.search_transcript(self.project.transcript, query)
+
+    def export_project(self):
+        if not self.project:
+            return {"error": "No project loaded."}
+        result = webview.windows[0].create_file_dialog(
+            webview.SAVE_DIALOG,
+            save_filename=f"{self.project.name}_export.mp4",
+            file_types=("MP4 video (*.mp4)",),
+        )
+        if not result:
+            return None
+        out_path = result[0] if isinstance(result, (list, tuple)) else result
+        try:
+            ffmpeg_ops.export(self.project, out_path)
+        except Exception as e:
+            return {"error": str(e)}
+        return {"path": out_path}
 
 
 def main():

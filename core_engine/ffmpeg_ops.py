@@ -91,11 +91,157 @@ def cut_clip(input_path: str, output_path: str, start: float, end: float) -> str
     return output_path
 
 
-def export(input_path: str, output_path: str, format: str = "mp4") -> str:
-    """Render the final export. Placeholder for now — will grow to accept
-    a full scene/timeline list once project_state.py is wired in."""
+def _escape_drawtext(text: str) -> str:
+    return text.replace("\\", "\\\\").replace("'", "\\'").replace(":", "\\:")
+
+
+_FONT_CANDIDATES = [
+    r"C:\Windows\Fonts\arial.ttf",
+    r"C:\Windows\Fonts\segoeui.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+
+
+def _find_font_file() -> str | None:
+    for candidate in _FONT_CANDIDATES:
+        if Path(candidate).exists():
+            # ffmpeg filter syntax needs ':' and '\' escaped inside the arg
+            return candidate.replace("\\", "/").replace(":", "\\:")
+    return None
+
+
+def export(project, output_path: str) -> str:
+    """
+    Composite a Project's tracks into one rendered file.
+
+    `project` is a project_state.Project (duck-typed here — this module
+    only reads .track(kind)/.tracks and Clip's fields, so it stays
+    decoupled from project_state and independently testable).
+
+    - The video track drives the timeline length: its clips are placed
+      back-to-back at their start_time, with black/silence inserted to
+      fill any gap between them.
+    - The audio track is mixed on top of the video track's own audio
+      (each audio clip delayed to its start_time), not a replacement —
+      adding music shouldn't silently drop the original dialogue.
+    - The text track becomes drawtext overlays, each visible only during
+      its clip's [start_time, end_time) window.
+
+    Known v1 simplifications: video-track clips are assumed to each have
+    their own audio stream (silent source video isn't handled specially),
+    and overlapping video clips aren't resolved — later start_time simply
+    concatenates after, so overlaps will just play back-to-back rather
+    than actually overlapping.
+    """
     ffmpeg = _ffmpeg_path()
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
-    cmd = [ffmpeg, "-y", "-i", input_path, "-c:v", "libx264", "-c:a", "aac", output_path]
-    subprocess.run(cmd, capture_output=True, text=True, check=True)
+
+    video_track = project.track("video")
+    video_clips = sorted(video_track.clips, key=lambda c: c.start_time)
+    if not video_clips:
+        raise ValueError("Cannot export: the video track has no clips.")
+
+    ref_info = probe(video_clips[0].source_path)
+    width = ref_info["width"] or 1280
+    height = ref_info["height"] or 720
+    fps = ref_info["fps"] or 30
+
+    inputs: list[list[str]] = []
+
+    def add_input(args: list[str]) -> int:
+        idx = len(inputs)
+        inputs.append(args)
+        return idx
+
+    filter_parts: list[str] = []
+    video_labels: list[str] = []
+    audio_labels: list[str] = []
+    cursor = 0.0
+
+    for clip in video_clips:
+        if clip.start_time > cursor + 1e-6:
+            gap = clip.start_time - cursor
+            gv_idx = add_input(["-f", "lavfi", "-i", f"color=c=black:s={width}x{height}:d={gap}:r={fps}"])
+            ga_idx = add_input(["-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"])
+            gv_label, ga_label = f"gv{len(video_labels)}", f"ga{len(audio_labels)}"
+            filter_parts.append(f"[{gv_idx}:v]trim=duration={gap},setpts=PTS-STARTPTS[{gv_label}]")
+            filter_parts.append(f"[{ga_idx}:a]atrim=duration={gap},asetpts=PTS-STARTPTS[{ga_label}]")
+            video_labels.append(gv_label)
+            audio_labels.append(ga_label)
+            cursor += gap
+
+        v_idx = add_input(["-i", clip.source_path])
+        v_label, a_label = f"v{len(video_labels)}", f"a{len(audio_labels)}"
+        filter_parts.append(
+            f"[{v_idx}:v]trim=start={clip.in_point}:end={clip.out_point},setpts=PTS-STARTPTS[{v_label}]"
+        )
+        filter_parts.append(
+            f"[{v_idx}:a]atrim=start={clip.in_point}:end={clip.out_point},asetpts=PTS-STARTPTS[{a_label}]"
+        )
+        video_labels.append(v_label)
+        audio_labels.append(a_label)
+        cursor += clip.duration
+
+    timeline_duration = cursor
+
+    n = len(video_labels)
+    filter_parts.append("".join(f"[{l}]" for l in video_labels) + f"concat=n={n}:v=1:a=0[basev]")
+    filter_parts.append("".join(f"[{l}]" for l in audio_labels) + f"concat=n={n}:v=0:a=1[baseaudio]")
+
+    final_audio_label = "baseaudio"
+    audio_track = project.track("audio")
+    if audio_track.clips:
+        mix_labels = ["baseaudio"]
+        for i, clip in enumerate(audio_track.clips):
+            a_idx = add_input(["-i", clip.source_path])
+            trimmed, delayed = f"aoT{i}", f"aoD{i}"
+            filter_parts.append(
+                f"[{a_idx}:a]atrim=start={clip.in_point}:end={clip.out_point},asetpts=PTS-STARTPTS[{trimmed}]"
+            )
+            delay_ms = int(clip.start_time * 1000)
+            filter_parts.append(f"[{trimmed}]adelay={delay_ms}|{delay_ms}[{delayed}]")
+            mix_labels.append(delayed)
+        filter_parts.append(
+            "".join(f"[{l}]" for l in mix_labels) + f"amix=inputs={len(mix_labels)}:duration=first[mixedaudio]"
+        )
+        final_audio_label = "mixedaudio"
+
+    final_video_label = "basev"
+    text_track = project.track("text")
+    if any(c.label for c in text_track.clips):
+        font_file = _find_font_file()
+        if not font_file:
+            raise RuntimeError(
+                "No usable font file found for text overlays "
+                f"(checked: {', '.join(_FONT_CANDIDATES)})."
+            )
+        for i, clip in enumerate(text_track.clips):
+            if not clip.label:
+                continue
+            next_label = f"txt{i}"
+            text = _escape_drawtext(clip.label)
+            filter_parts.append(
+                f"[{final_video_label}]drawtext=fontfile='{font_file}':text='{text}':fontcolor=white:fontsize=36:"
+                f"box=1:boxcolor=black@0.5:boxborderw=8:x=(w-text_w)/2:y=h-th-40:"
+                f"enable='between(t,{clip.start_time},{clip.end_time})'[{next_label}]"
+            )
+            final_video_label = next_label
+
+    filter_complex = ";".join(filter_parts)
+
+    cmd = [ffmpeg, "-y"]
+    for input_args in inputs:
+        cmd.extend(input_args)
+    cmd.extend([
+        "-filter_complex", filter_complex,
+        "-map", f"[{final_video_label}]",
+        "-map", f"[{final_audio_label}]",
+        "-t", str(timeline_duration),
+        "-c:v", "libx264", "-c:a", "aac",
+        output_path,
+    ])
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg export failed:\n{result.stderr}")
     return output_path

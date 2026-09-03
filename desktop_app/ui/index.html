@@ -73,15 +73,37 @@
 
   video { width: 100%; flex: 1; min-height: 0; background: #000; border-radius: 8px; object-fit: contain; }
 
-  .timeline-row { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
+  .timeline-container { display: flex; flex-direction: column; gap: 8px; flex: 0 0 auto; }
   .trim-controls { display: flex; gap: 10px; align-items: center; font-size: 13px; flex: 0 0 auto; }
   .trim-controls input { width: 70px; background: var(--panel); border: 1px solid var(--border);
     color: var(--text); border-radius: 4px; padding: 5px 8px; }
-  .scenes { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0; flex: 1; }
-  .scene-chip {
-    flex: 0 0 auto; padding: 8px 12px; background: var(--panel); border: 1px solid var(--border);
-    border-radius: 6px; font-size: 12px; color: var(--text-muted);
+
+  .timeline-scroll {
+    overflow-x: auto; overflow-y: hidden; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel);
   }
+  .timeline-ruler { height: 20px; position: relative; border-bottom: 1px solid var(--border); }
+  .timeline-ruler span {
+    position: absolute; top: 3px; font-size: 10px; color: var(--text-muted); white-space: nowrap;
+  }
+  .track-row { display: flex; align-items: stretch; border-bottom: 1px solid var(--border); }
+  .track-row:last-child { border-bottom: none; }
+  .track-label {
+    flex: 0 0 56px; padding: 0 8px; font-size: 11px; color: var(--text-muted);
+    display: flex; align-items: center; border-right: 1px solid var(--border);
+    position: sticky; left: 0; background: var(--panel);
+  }
+  .track-lane { position: relative; height: 40px; }
+  .clip-box {
+    position: absolute; top: 4px; bottom: 4px; border-radius: 4px; padding: 4px 6px;
+    font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
+    cursor: grab; border: 1px solid transparent; user-select: none;
+  }
+  .clip-box.video { background: #4c4a8a; color: var(--text); }
+  .clip-box.audio { background: #3d6b5c; color: var(--text); }
+  .clip-box.text { background: #7a5a3d; color: var(--text); }
+  .clip-box.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .clip-box.dragging { opacity: 0.8; cursor: grabbing; }
 
   .tool-rail {
     display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
@@ -161,12 +183,30 @@
   <main class="editor-main">
     <video id="preview" controls></video>
 
-    <div class="timeline-row">
+    <div class="timeline-container">
       <div class="trim-controls">
         <label>Start (s) <input id="start" type="number" min="0" step="0.1" value="0" /></label>
         <label>End (s) <input id="end" type="number" min="0" step="0.1" value="5" /></label>
       </div>
-      <div id="scenes" class="scenes"></div>
+
+      <div class="timeline-scroll">
+        <div class="track-row">
+          <span class="track-label"></span>
+          <div id="timeline-ruler" class="timeline-ruler"></div>
+        </div>
+        <div class="track-row">
+          <span class="track-label">Video</span>
+          <div id="track-lane-video" class="track-lane"></div>
+        </div>
+        <div class="track-row">
+          <span class="track-label">Audio</span>
+          <div id="track-lane-audio" class="track-lane"></div>
+        </div>
+        <div class="track-row">
+          <span class="track-label">Text</span>
+          <div id="track-lane-text" class="track-lane"></div>
+        </div>
+      </div>
     </div>
 
     <div class="tool-rail">
@@ -213,8 +253,13 @@
   const startScreenEl = document.getElementById('start-screen');
   const editorScreenEl = document.getElementById('editor-screen');
   const previewEl = document.getElementById('preview');
-  const scenesEl = document.getElementById('scenes');
   const statusEl = document.getElementById('status');
+  const timelineRulerEl = document.getElementById('timeline-ruler');
+  const trackLaneEls = {
+    video: document.getElementById('track-lane-video'),
+    audio: document.getElementById('track-lane-audio'),
+    text: document.getElementById('track-lane-text'),
+  };
   const headerTitleEl = document.getElementById('header-title');
   const cutBtnEl = document.getElementById('cut-btn');
   const transcribeBtnEl = document.getElementById('transcribe-btn');
@@ -230,6 +275,10 @@
   const modalCancelEl = document.getElementById('modal-cancel');
 
   let currentTranscript = [];
+  let currentTracks = [];
+  let selectedClipId = null;
+  let dragState = null;
+  const PX_PER_SEC = 30;
 
   function showScreen(name) {
     startScreenEl.style.display = name === 'start' ? 'flex' : 'none';
@@ -251,21 +300,106 @@
 
   modalCancelEl.addEventListener('click', hideModal);
 
-  function renderScenes(scenes) {
-    scenesEl.innerHTML = '';
-    (scenes || []).forEach(s => {
-      const chip = document.createElement('div');
-      chip.className = 'scene-chip';
-      chip.textContent = `${s.id} (${s.start}s–${s.end}s)`;
-      scenesEl.appendChild(chip);
-    });
-  }
-
   function formatTime(seconds) {
     const m = Math.floor(seconds / 60);
     const s = Math.floor(seconds % 60).toString().padStart(2, '0');
     return `${m}:${s}`;
   }
+
+  function timelineDuration(tracks) {
+    let maxEnd = 10; // floor so an empty timeline still shows some ruler
+    (tracks || []).forEach(t => (t.clips || []).forEach(c => {
+      if (c.end_time > maxEnd) maxEnd = c.end_time;
+    }));
+    return maxEnd + 5;
+  }
+
+  function renderRuler(durationSeconds) {
+    const widthPx = durationSeconds * PX_PER_SEC;
+    timelineRulerEl.style.width = widthPx + 'px';
+    timelineRulerEl.innerHTML = '';
+    for (let t = 0; t <= durationSeconds; t += 5) {
+      const tick = document.createElement('span');
+      tick.style.left = (t * PX_PER_SEC) + 'px';
+      tick.textContent = formatTime(t);
+      timelineRulerEl.appendChild(tick);
+    }
+  }
+
+  function renderTrackLane(kind, clips, widthPx) {
+    const lane = trackLaneEls[kind];
+    lane.innerHTML = '';
+    lane.style.width = widthPx + 'px';
+    (clips || []).forEach(clip => {
+      const box = document.createElement('div');
+      box.className = 'clip-box ' + kind + (clip.id === selectedClipId ? ' selected' : '');
+      box.style.left = (clip.start_time * PX_PER_SEC) + 'px';
+      box.style.width = Math.max(clip.duration * PX_PER_SEC, 20) + 'px';
+      box.textContent = clip.label || clip.id;
+      box.title = `${clip.label || clip.id} (${clip.duration.toFixed(1)}s)`;
+      box.addEventListener('mousedown', e => startClipDrag(e, box, clip, kind));
+      box.addEventListener('click', e => {
+        e.stopPropagation();
+        selectedClipId = clip.id;
+        renderTracks(currentTracks);
+      });
+      lane.appendChild(box);
+    });
+  }
+
+  function renderTracks(tracks) {
+    currentTracks = tracks || [];
+    const duration = timelineDuration(currentTracks);
+    const widthPx = duration * PX_PER_SEC;
+    renderRuler(duration);
+    ['video', 'audio', 'text'].forEach(kind => {
+      const track = currentTracks.find(t => t.kind === kind) || { clips: [] };
+      renderTrackLane(kind, track.clips, widthPx);
+    });
+  }
+
+  function startClipDrag(e, boxEl, clip, kind) {
+    e.preventDefault();
+    dragState = {
+      boxEl, clip, kind,
+      startMouseX: e.clientX,
+      startLeftPx: clip.start_time * PX_PER_SEC,
+      newStartTime: undefined,
+    };
+    boxEl.classList.add('dragging');
+    document.addEventListener('mousemove', onClipDragMove);
+    document.addEventListener('mouseup', onClipDragEnd);
+  }
+
+  function onClipDragMove(e) {
+    if (!dragState) return;
+    const deltaPx = e.clientX - dragState.startMouseX;
+    const newLeftPx = Math.max(0, dragState.startLeftPx + deltaPx);
+    dragState.boxEl.style.left = newLeftPx + 'px';
+    dragState.newStartTime = newLeftPx / PX_PER_SEC;
+  }
+
+  async function onClipDragEnd() {
+    document.removeEventListener('mousemove', onClipDragMove);
+    document.removeEventListener('mouseup', onClipDragEnd);
+    const state = dragState;
+    dragState = null;
+    if (!state) return;
+    state.boxEl.classList.remove('dragging');
+    if (state.newStartTime === undefined || Math.abs(state.newStartTime - state.clip.start_time) < 0.01) {
+      return; // no meaningful move — leave as-is, no need to round-trip to the backend
+    }
+    const result = await window.pywebview.api.move_clip(state.kind, state.clip.id, state.newStartTime);
+    if (result.error) { alert(result.error); }
+    refreshTracks();
+  }
+
+  Object.values(trackLaneEls).forEach(lane => {
+    lane.addEventListener('click', () => {
+      selectedClipId = null;
+      renderTracks(currentTracks);
+    });
+  });
 
   function renderTranscript(segments) {
     transcriptListEl.innerHTML = '';
@@ -290,7 +424,8 @@
 
     const project = result.project || {};
     headerTitleEl.textContent = project.name || 'Scenecraft';
-    renderScenes(project.scenes);
+    selectedClipId = null;
+    renderTracks(project.tracks);
 
     currentTranscript = project.transcript || [];
     transcriptSearchEl.value = '';
@@ -371,12 +506,12 @@
       return;
     }
     statusEl.textContent = 'Saved ' + result.scene_id;
-    refreshScenes();
+    refreshTracks();
   }
 
-  async function refreshScenes() {
-    const scenes = await window.pywebview.api.get_scenes();
-    renderScenes(scenes);
+  async function refreshTracks() {
+    const tracks = await window.pywebview.api.get_tracks();
+    renderTracks(tracks);
   }
 
   async function transcribeVideo() {
@@ -411,8 +546,15 @@
   document.getElementById('open-project-btn').addEventListener('click', openProjectFlow);
   document.getElementById('cut-btn').addEventListener('click', cutScene);
   document.getElementById('transcribe-btn').addEventListener('click', transcribeVideo);
-  document.getElementById('export-btn').addEventListener('click', () => {
-    statusEl.textContent = 'Export coming in the next pass — cutting works first.';
+  document.getElementById('export-btn').addEventListener('click', async () => {
+    statusEl.textContent = 'Exporting…';
+    const result = await window.pywebview.api.export_project();
+    if (!result) { statusEl.textContent = ''; return; } // user cancelled the save dialog
+    if (result.error) {
+      statusEl.textContent = 'Export error: ' + result.error;
+      return;
+    }
+    statusEl.textContent = 'Exported to ' + result.path;
   });
 
   showScreen('start');
