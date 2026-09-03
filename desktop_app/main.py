@@ -21,10 +21,24 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import webview
-from core_engine import ffmpeg_ops, project_state, whisper_ops, script_ops
+from core_engine import ffmpeg_ops, project_state, whisper_ops, script_ops, llm_ops, motion_graphics_ops
 
 SCENECRAFT_ROOT = Path.home() / "Scenecraft"
 SETTINGS_PATH = SCENECRAFT_ROOT / "settings.json"
+
+
+def _strip_markdown_fences(text: str) -> str:
+    """Local models wrap code in ```html fences more often than not,
+    even when told not to — strip them rather than fail on it."""
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
 
 # WebView2 on Windows won't reliably play file:// video (no seeking, often
 # no rendering at all). Instead we serve video files ourselves over plain
@@ -589,6 +603,65 @@ class Api:
             return {"error": str(e)}
         return {"path": out_path}
 
+    # ---- motion graphics: local AI writes the animation, Playwright renders it ----
+    _MOTION_GRAPHIC_SYSTEM_PROMPT = (
+        "You write a single self-contained HTML document (inline <style> and <script>, "
+        "no external resources) that renders a CSS/JS animation matching the user's "
+        "description. It must start playing automatically on page load, with no click "
+        "or other user interaction required. Reply with ONLY the raw HTML — no markdown "
+        "code fences, no explanation before or after it."
+    )
+
+    def generate_motion_graphic(self, description: str, duration: float = 3.0):
+        """The one genuinely AI-generated feature in this app: a local
+        Ollama model writes an HTML/CSS/JS animation for the given
+        description, a headless browser (Playwright) plays it back and
+        captures frames, ffmpeg encodes those into a clip that lands on
+        the video track like anything else. Slow on modest hardware —
+        the model alone can take tens of seconds — and a small local
+        code model's output quality is well below what a large hosted
+        model or a real generative-video API would produce; this is
+        genuinely offline and free, not a substitute for those."""
+        if not self.project:
+            return {"error": "No project loaded."}
+        if not description or not description.strip():
+            return {"error": "Describe what you want the motion graphic to show."}
+        if not llm_ops.is_available():
+            return {"error": "Local AI (Ollama) isn't running. Install/start Ollama to generate motion graphics."}
+
+        try:
+            html = llm_ops.generate(description.strip(), system=self._MOTION_GRAPHIC_SYSTEM_PROMPT)
+        except llm_ops.OllamaUnavailableError as e:
+            return {"error": str(e)}
+        html = _strip_markdown_fences(html)
+        if "<html" not in html.lower():
+            return {"error": "The local AI didn't return usable HTML for that description — try rephrasing, or a simpler description."}
+
+        out_dir = SCENECRAFT_ROOT / self.project.name / "motion_graphics"
+        out_path = str(out_dir / f"motiongraphic_{uuid.uuid4().hex[:8]}.mp4")
+        try:
+            motion_graphics_ops.render_html_animation(html, out_path, duration=duration)
+        except Exception as e:
+            return {"error": f"Failed to render the animation: {e}"}
+
+        video_track = self.project.track("video")
+        timeline_start = max((c.end_time for c in video_track.clips), default=0.0)
+        clip = project_state.Clip(
+            id=f"motiongraphic_{len(video_track.clips) + 1}",
+            source_path=out_path,
+            in_point=0.0,
+            out_point=duration,
+            start_time=timeline_start,
+            label=description.strip()[:60],
+        )
+        self.project.add_clip(clip, track="video")
+        self._save_project()
+        try:
+            playable = self._playable_path(out_path)
+        except Exception:
+            playable = out_path
+        return {"ok": True, "path": self._media_url(playable), "project": self._project_payload()}
+
     # ---- composer: local, offline pattern-matched commands ----
     # No network, no API key. Recognizes a fixed set of phrasings and maps
     # them onto the same Api methods the UI buttons already call — this
@@ -720,13 +793,47 @@ class Api:
                 return {"action": "export", "message": "Cancelled — no save location chosen.", "result": None}
             return {"action": "export", "message": f"Exported to {result.get('path')}." if "error" not in result else result["error"], "result": result}
 
+        # "generate a motion graphic of X" / "create an animation showing X"
+        m = re.search(r"\b(?:generate|create|make)\s+(?:a\s+)?(?:motion graphic|animation)\s+(?:of|showing|with)\s+(.+)$", t)
+        if m:
+            description = raw[m.start(1):m.end(1)]
+            result = self.generate_motion_graphic(description)
+            return {"action": "motion_graphic", "message": "Generated motion graphic." if "error" not in result else result["error"], "result": result}
+
+        # Local AI (Ollama) fallback — only reached if nothing above
+        # matched. Silently skipped if Ollama isn't running; the
+        # deterministic patterns above always run first and are instant,
+        # this never blocks or slows down the common case.
+        if llm_ops.is_available():
+            try:
+                interpretation = llm_ops.interpret_command(raw)
+            except llm_ops.OllamaUnavailableError:
+                interpretation = {"action": "unknown"}
+            action = interpretation.get("action")
+            if action == "cut" and "start" in interpretation and "end" in interpretation:
+                result = self.cut_scene(float(interpretation["start"]), float(interpretation["end"]))
+                return {"action": "cut", "message": "Cut it (via local AI)." if "error" not in result else result["error"], "result": result}
+            if action == "seek" and "time" in interpretation:
+                return {"action": "seek", "message": "Jumped there (via local AI).", "result": {"time": float(interpretation["time"])}}
+            if action == "effect" and interpretation.get("effect") == "grayscale":
+                clips = self._target_video_clips(selected_clip_id)
+                for c in clips:
+                    c.effects["grayscale"] = True
+                self._save_project()
+                return {"action": "effect", "message": f"Made {len(clips)} clip(s) black and white (via local AI).", "result": {"project": self._project_payload()}}
+            if action == "effect" and interpretation.get("effect") in self._EFFECT_BOUNDS and "delta" in interpretation:
+                n = self._adjust_effect(selected_clip_id, interpretation["effect"], float(interpretation["delta"]))
+                return {"action": "effect", "message": f"Adjusted {interpretation['effect']} (via local AI) on {n} clip(s).", "result": {"project": self._project_payload()}}
+
         return {
             "error": (
                 f"Didn't recognize that command: {raw!r}. This composer only understands a fixed set of "
                 "phrasings (no AI interpretation, no network) — try things like \"cut the first 5 seconds\", "
                 "\"cut at 3 seconds\", \"add music\", \"add captions\", \"go to 1:23\", \"brighter\"/\"darker\", "
                 "\"more contrast\"/\"less contrast\", \"more saturation\"/\"less saturation\", "
-                "\"black and white\", \"reset effects\", \"transcribe\", \"search for fox\", or \"export\"."
+                "\"black and white\", \"reset effects\", \"generate a motion graphic of X\", "
+                "\"transcribe\", \"search for fox\", or \"export\". If a local AI (Ollama) is "
+                "running, phrasings close to these are also understood even if not word-for-word."
             )
         }
 
