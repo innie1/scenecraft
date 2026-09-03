@@ -420,7 +420,7 @@
 
   function hydrateProject(result) {
     if (!result) return;
-    previewEl.src = 'file://' + result.path;
+    previewEl.src = result.path; // already a served http://127.0.0.1:<port>/media?... URL
 
     const project = result.project || {};
     headerTitleEl.textContent = project.name || 'Scenecraft';

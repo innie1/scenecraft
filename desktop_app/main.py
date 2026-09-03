@@ -7,6 +7,11 @@ directly — it always goes through this Api class.
 
 import sys
 import os
+import http.server
+import socketserver
+import threading
+import urllib.parse
+import mimetypes
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -16,11 +21,118 @@ from core_engine import ffmpeg_ops, project_state, whisper_ops
 
 SCENECRAFT_ROOT = Path.home() / "Scenecraft"
 
+# WebView2 on Windows won't reliably play file:// video (no seeking, often
+# no rendering at all). Instead we serve video files ourselves over plain
+# HTTP with Range support, and point <video src> at that. Only paths this
+# app has explicitly registered (via Api._media_url) are servable — this
+# is a local, no-auth server, so it must not become an arbitrary local
+# file server just because it's bound to 127.0.0.1.
+_ALLOWED_MEDIA_PATHS: set[str] = set()
+
+
+class _RangeRequestHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, fmt, *args):
+        pass  # keep stdout clean; errors still show via send_error
+
+    def do_HEAD(self):
+        self._serve(send_body=False)
+
+    def do_GET(self):
+        self._serve(send_body=True)
+
+    def _serve(self, send_body: bool):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path != "/media":
+            self.send_error(404, "Not found")
+            return
+        query = urllib.parse.parse_qs(parsed.query)
+        raw = query.get("path", [None])[0]
+        if not raw:
+            self.send_error(400, "Missing path")
+            return
+        file_path = urllib.parse.unquote(raw)
+        if file_path not in _ALLOWED_MEDIA_PATHS:
+            self.send_error(403, "Not registered for serving")
+            return
+        p = Path(file_path)
+        if not p.is_file():
+            self.send_error(404, "File not found")
+            return
+
+        file_size = p.stat().st_size
+        content_type = mimetypes.guess_type(str(p))[0] or "application/octet-stream"
+        range_header = self.headers.get("Range")
+
+        start, end = 0, file_size - 1
+        status = 200
+        if range_header:
+            try:
+                _, rng = range_header.split("=", 1)
+                start_str, end_str = rng.split("-", 1)
+                start = int(start_str) if start_str else 0
+                end = int(end_str) if end_str else file_size - 1
+                end = min(end, file_size - 1)
+                if start > end or start < 0:
+                    raise ValueError
+                status = 206
+            except ValueError:
+                self.send_response(416)
+                self.send_header("Content-Range", f"bytes */{file_size}")
+                self.end_headers()
+                return
+
+        length = end - start + 1
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Length", str(length))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        if status == 206:
+            self.send_header("Content-Range", f"bytes {start}-{end}/{file_size}")
+        self.end_headers()
+
+        if not send_body:
+            return
+        chunk_size = 256 * 1024
+        with open(p, "rb") as f:
+            f.seek(start)
+            remaining = length
+            while remaining > 0:
+                chunk = f.read(min(chunk_size, remaining))
+                if not chunk:
+                    break
+                try:
+                    self.wfile.write(chunk)
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    return
+                remaining -= len(chunk)
+
+
+class _ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+
+
+def _start_media_server() -> int:
+    """Starts the range-request media server on a free localhost port in a
+    background thread, returns the port it bound to."""
+    server = _ThreadingHTTPServer(("127.0.0.1", 0), _RangeRequestHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return port
+
 
 class Api:
-    def __init__(self):
+    def __init__(self, media_port: int):
         self.project: project_state.Project | None = None
         self.project_path: str | None = None
+        self.media_port = media_port
+
+    def _media_url(self, path: str | None) -> str | None:
+        if not path:
+            return None
+        _ALLOWED_MEDIA_PATHS.add(path)
+        return f"http://127.0.0.1:{self.media_port}/media?path={urllib.parse.quote(path, safe='')}"
 
     def _tracks_payload(self):
         return [
@@ -67,7 +179,7 @@ class Api:
         )
         self.project_path = None
         info = ffmpeg_ops.probe(source)
-        return {"path": source, "info": info, "project": self._project_payload()}
+        return {"path": self._media_url(source), "info": info, "project": self._project_payload()}
 
     def list_projects(self):
         """Names + paths of saved projects under ~/Scenecraft."""
@@ -108,7 +220,7 @@ class Api:
 
         self.project = project
         self.project_path = path
-        return {"path": source, "info": info, "project": self._project_payload()}
+        return {"path": self._media_url(source), "info": info, "project": self._project_payload()}
 
     def open_project(self, path: str):
         try:
@@ -122,7 +234,7 @@ class Api:
             info = ffmpeg_ops.probe(project.source_video)
         except Exception:
             info = None
-        return {"path": project.source_video, "info": info, "project": self._project_payload()}
+        return {"path": self._media_url(project.source_video), "info": info, "project": self._project_payload()}
 
     def cut_scene(self, start: float, end: float):
         """Cuts [start, end) out of the source video into its own file and
@@ -205,7 +317,8 @@ class Api:
 
 
 def main():
-    api = Api()
+    media_port = _start_media_server()
+    api = Api(media_port=media_port)
     ui_path = Path(__file__).resolve().parent / "ui" / "index.html"
     webview.create_window(
         "Scenecraft", str(ui_path), js_api=api, width=1100, height=720, min_size=(800, 560)
