@@ -7,29 +7,20 @@
   :root {
     --bg: #121212;
     --panel: #1c1c1c;
+    --panel-raised: #232323;
     --border: #2c2c2c;
     --text: #e8e8e6;
     --text-muted: #8a8a86;
     --accent: #7f77dd;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0;
     background: var(--bg);
     color: var(--text);
     font-family: -apple-system, "Segoe UI", sans-serif;
-    height: 100vh;
-    display: flex;
-    flex-direction: column;
   }
-  header {
-    padding: 12px 20px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-  }
-  header h1 { font-size: 15px; font-weight: 500; margin: 0; }
   button {
     background: var(--panel);
     border: 1px solid var(--border);
@@ -41,23 +32,83 @@
   }
   button:hover { border-color: var(--accent); }
   button.primary { background: var(--accent); color: #121212; border: none; }
-  main { flex: 1; display: flex; overflow: hidden; }
-  .editor { flex: 1; display: flex; flex-direction: column; padding: 16px; gap: 12px; }
-  video { width: 100%; max-height: 55vh; background: #000; border-radius: 8px; }
-  .empty-state {
-    flex: 1; display: flex; flex-direction: column; align-items: center;
-    justify-content: center; gap: 12px; color: var(--text-muted);
+
+  .screen { height: 100vh; display: flex; flex-direction: column; }
+
+  /* ---------- Screen 1: start ---------- */
+  .start-screen {
+    align-items: center;
+    justify-content: center;
   }
-  .trim-controls { display: flex; gap: 10px; align-items: center; font-size: 13px; }
-  .trim-controls input { width: 80px; background: var(--panel); border: 1px solid var(--border);
+  .start-buttons { display: flex; gap: 16px; }
+  .start-buttons button.large {
+    padding: 14px 28px;
+    font-size: 14px;
+    border-radius: 8px;
+  }
+
+  /* ---------- Screen 2: editor ---------- */
+  header {
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex: 0 0 auto;
+  }
+  header h1 { font-size: 15px; font-weight: 500; margin: 0; }
+
+  .editor-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 16px 20px;
+    gap: 12px;
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  video { width: 100%; flex: 1; min-height: 0; background: #000; border-radius: 8px; object-fit: contain; }
+
+  .timeline-row { display: flex; align-items: center; gap: 14px; flex: 0 0 auto; }
+  .trim-controls { display: flex; gap: 10px; align-items: center; font-size: 13px; flex: 0 0 auto; }
+  .trim-controls input { width: 70px; background: var(--panel); border: 1px solid var(--border);
     color: var(--text); border-radius: 4px; padding: 5px 8px; }
-  .scenes { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0; }
+  .scenes { display: flex; gap: 8px; overflow-x: auto; padding: 4px 0; flex: 1; }
   .scene-chip {
     flex: 0 0 auto; padding: 8px 12px; background: var(--panel); border: 1px solid var(--border);
     border-radius: 6px; font-size: 12px; color: var(--text-muted);
   }
-  aside { width: 260px; border-left: 1px solid var(--border); padding: 16px; font-size: 12px; color: var(--text-muted); overflow-y: auto; }
 
+  .tool-rail {
+    display: flex; align-items: center; gap: 8px; flex: 0 0 auto;
+    border-top: 1px solid var(--border); padding-top: 12px;
+  }
+  .icon-btn {
+    width: 36px; height: 36px; padding: 0; display: flex; align-items: center; justify-content: center;
+    border-radius: 8px;
+  }
+  .icon-btn svg { width: 18px; height: 18px; }
+  .icon-btn.active { border-color: var(--accent); color: var(--accent); }
+  .status-text { color: var(--text-muted); font-size: 12px; margin-left: 4px; }
+
+  .transcript-panel {
+    flex: 0 0 auto; max-height: 220px; display: flex; flex-direction: column; gap: 8px;
+    background: var(--panel-raised); border: 1px solid var(--border); border-radius: 8px;
+    padding: 12px; overflow: hidden;
+  }
+  .transcript-panel-header { display: flex; justify-content: space-between; align-items: center; font-size: 12px; }
+  .transcript-panel-header strong { color: var(--text); }
+  #transcript-search {
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); border-radius: 4px; padding: 6px 8px; font-size: 12px;
+  }
+  .transcript-list { display: flex; flex-direction: column; gap: 4px; overflow-y: auto; }
+  .transcript-row { padding: 6px 8px; border-radius: 4px; cursor: pointer; line-height: 1.4; font-size: 12px; }
+  .transcript-row:hover { background: var(--bg); }
+  .transcript-row .ts { color: var(--accent); margin-right: 6px; font-variant-numeric: tabular-nums; }
+
+  /* ---------- Modal (shared) ---------- */
   .modal-overlay {
     position: fixed; inset: 0; background: rgba(0,0,0,0.55);
     display: none; align-items: center; justify-content: center; z-index: 10;
@@ -79,69 +130,62 @@
     padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; cursor: pointer; font-size: 13px;
   }
   .project-row:hover { border-color: var(--accent); }
-
-  .transcript-header { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; }
-  .transcript-header strong { color: var(--text); }
-  #transcript-search {
-    width: 100%; margin: 8px 0; background: var(--bg); border: 1px solid var(--border);
-    color: var(--text); border-radius: 4px; padding: 6px 8px; font-size: 12px;
-  }
-  .transcript-list { display: flex; flex-direction: column; gap: 4px; }
-  .transcript-row {
-    padding: 6px 8px; border-radius: 4px; cursor: pointer; line-height: 1.4;
-  }
-  .transcript-row:hover { background: var(--bg); }
-  .transcript-row .ts { color: var(--accent); margin-right: 6px; font-variant-numeric: tabular-nums; }
 </style>
 </head>
 <body>
 
-<header>
-  <h1 id="header-title">Scenecraft</h1>
-  <div style="display:flex; gap:8px;">
-    <button id="open-btn">Open video</button>
-    <button id="export-btn" class="primary">Export</button>
+<div id="start-screen" class="screen start-screen">
+  <div class="start-buttons">
+    <button id="new-project-btn" class="primary large">New project</button>
+    <button id="open-project-btn" class="large">Open project</button>
   </div>
-</header>
+</div>
 
-<main>
-  <div class="editor">
-    <div id="empty" class="empty-state">
-      <p>No video loaded yet.</p>
-      <div style="display:flex; gap:8px;">
-        <button id="start-project-btn" class="primary">Start a project</button>
-        <button id="open-btn-2">Open a video to start</button>
-        <button id="open-project-btn">Open project</button>
-      </div>
-    </div>
+<div id="editor-screen" class="screen editor-screen" style="display:none;">
+  <header>
+    <h1 id="header-title">Scenecraft</h1>
+    <button id="export-btn" class="primary">Export</button>
+  </header>
 
-    <div id="workspace" style="display:none; flex-direction:column; gap:12px;">
-      <video id="preview" controls></video>
+  <main class="editor-main">
+    <video id="preview" controls></video>
 
+    <div class="timeline-row">
       <div class="trim-controls">
         <label>Start (s) <input id="start" type="number" min="0" step="0.1" value="0" /></label>
         <label>End (s) <input id="end" type="number" min="0" step="0.1" value="5" /></label>
-        <button id="cut-btn">Cut scene</button>
-        <button id="transcribe-btn">Transcribe</button>
-        <span id="status" style="color: var(--text-muted);"></span>
       </div>
-
       <div id="scenes" class="scenes"></div>
     </div>
-  </div>
 
-  <aside>
-    <p><strong style="color: var(--text);">Project info</strong></p>
-    <p id="info">Nothing loaded.</p>
-
-    <div class="transcript-header">
-      <strong>Transcript</strong>
+    <div class="tool-rail">
+      <button id="cut-btn" class="icon-btn" title="Cut scene">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="6" cy="6" r="3"></circle>
+          <circle cx="6" cy="18" r="3"></circle>
+          <line x1="20" y1="4" x2="8.12" y2="15.88"></line>
+          <line x1="14.47" y1="14.48" x2="20" y2="20"></line>
+          <line x1="8.12" y1="8.12" x2="12" y2="12"></line>
+        </svg>
+      </button>
+      <button id="transcribe-btn" class="icon-btn" title="Transcribe">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+        </svg>
+      </button>
+      <span id="status" class="status-text"></span>
     </div>
-    <input id="transcript-search" type="text" placeholder="Search transcript…" />
-    <div id="transcript-status" style="margin-bottom:6px;"></div>
-    <div id="transcript-list" class="transcript-list"></div>
-  </aside>
-</main>
+
+    <div id="transcript-panel" class="transcript-panel" style="display:none;">
+      <div class="transcript-panel-header">
+        <strong>Transcript</strong>
+        <span id="transcript-status" style="color: var(--text-muted);"></span>
+      </div>
+      <input id="transcript-search" type="text" placeholder="Search transcript…" />
+      <div id="transcript-list" class="transcript-list"></div>
+    </div>
+  </main>
+</div>
 
 <div id="modal-overlay" class="modal-overlay">
   <div class="modal">
@@ -155,14 +199,15 @@
 </div>
 
 <script>
-  const emptyEl = document.getElementById('empty');
-  const workspaceEl = document.getElementById('workspace');
+  const startScreenEl = document.getElementById('start-screen');
+  const editorScreenEl = document.getElementById('editor-screen');
   const previewEl = document.getElementById('preview');
-  const infoEl = document.getElementById('info');
   const scenesEl = document.getElementById('scenes');
   const statusEl = document.getElementById('status');
   const headerTitleEl = document.getElementById('header-title');
+  const cutBtnEl = document.getElementById('cut-btn');
   const transcribeBtnEl = document.getElementById('transcribe-btn');
+  const transcriptPanelEl = document.getElementById('transcript-panel');
   const transcriptSearchEl = document.getElementById('transcript-search');
   const transcriptStatusEl = document.getElementById('transcript-status');
   const transcriptListEl = document.getElementById('transcript-list');
@@ -174,6 +219,11 @@
   const modalCancelEl = document.getElementById('modal-cancel');
 
   let currentTranscript = [];
+
+  function showScreen(name) {
+    startScreenEl.style.display = name === 'start' ? 'flex' : 'none';
+    editorScreenEl.style.display = name === 'editor' ? 'flex' : 'none';
+  }
 
   function showModal(title) {
     modalTitleEl.textContent = title;
@@ -225,17 +275,7 @@
 
   function hydrateProject(result) {
     if (!result) return;
-    emptyEl.style.display = 'none';
-    workspaceEl.style.display = 'flex';
     previewEl.src = 'file://' + result.path;
-
-    const info = result.info;
-    infoEl.innerHTML = info ? `
-      Duration: ${info.duration_seconds}s<br>
-      Resolution: ${info.width}x${info.height}<br>
-      FPS: ${info.fps}<br>
-      Codec: ${info.codec}
-    ` : 'Could not read video info.';
 
     const project = result.project || {};
     headerTitleEl.textContent = project.name || 'Scenecraft';
@@ -243,18 +283,24 @@
 
     currentTranscript = project.transcript || [];
     transcriptSearchEl.value = '';
-    transcriptStatusEl.textContent = currentTranscript.length ? `${currentTranscript.length} segments` : '';
-    renderTranscript(currentTranscript);
+    if (currentTranscript.length) {
+      transcriptStatusEl.textContent = `${currentTranscript.length} segments`;
+      renderTranscript(currentTranscript);
+      transcriptPanelEl.style.display = 'flex';
+      transcribeBtnEl.classList.add('active');
+    } else {
+      transcriptStatusEl.textContent = '';
+      transcriptListEl.innerHTML = '';
+      transcriptPanelEl.style.display = 'none';
+      transcribeBtnEl.classList.remove('active');
+    }
+
+    statusEl.textContent = '';
+    showScreen('editor');
   }
 
-  async function openVideo() {
-    const result = await window.pywebview.api.pick_video_file();
-    if (!result) return;
-    hydrateProject(result);
-  }
-
-  function startProjectFlow() {
-    showModal('Start a project');
+  function newProjectFlow() {
+    showModal('New project');
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = 'Project name';
@@ -324,7 +370,9 @@
 
   async function transcribeVideo() {
     transcribeBtnEl.disabled = true;
+    transcriptPanelEl.style.display = 'flex';
     transcriptStatusEl.textContent = 'Transcribing… this can take a while.';
+    transcriptListEl.innerHTML = '';
     const result = await window.pywebview.api.transcribe();
     transcribeBtnEl.disabled = false;
     if (result.error) {
@@ -334,6 +382,7 @@
     currentTranscript = result.transcript;
     transcriptStatusEl.textContent = `${currentTranscript.length} segments`;
     renderTranscript(currentTranscript);
+    transcribeBtnEl.classList.add('active');
   }
 
   transcriptSearchEl.addEventListener('input', async e => {
@@ -341,15 +390,15 @@
     renderTranscript(results);
   });
 
-  document.getElementById('open-btn').addEventListener('click', openVideo);
-  document.getElementById('open-btn-2').addEventListener('click', openVideo);
-  document.getElementById('start-project-btn').addEventListener('click', startProjectFlow);
+  document.getElementById('new-project-btn').addEventListener('click', newProjectFlow);
   document.getElementById('open-project-btn').addEventListener('click', openProjectFlow);
   document.getElementById('cut-btn').addEventListener('click', cutScene);
   document.getElementById('transcribe-btn').addEventListener('click', transcribeVideo);
   document.getElementById('export-btn').addEventListener('click', () => {
     statusEl.textContent = 'Export coming in the next pass — cutting works first.';
   });
+
+  showScreen('start');
 </script>
 
 </body>
