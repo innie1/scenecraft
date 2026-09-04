@@ -1033,6 +1033,9 @@
       transcriptSearchEl.value = response.result.query;
       showPreviewPane('transcript');
     }
+    if (response.action === 'write_script' && response.result && response.result.script) {
+      currentScript = response.result.script;
+    }
     if (response.action === 'seek' && response.result) {
       showPreviewPane('video');
       previewEl.currentTime = response.result.time;
