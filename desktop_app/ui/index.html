@@ -274,6 +274,23 @@
   .composer-msg.ai.pending { color: var(--text-muted); }
   .composer-msg.ai.error { border-color: #b5544f; color: #e8b4b0; }
 
+  /* A task that changed the project reads differently from a reply that
+     was only talk — otherwise you can't tell what actually happened. */
+  .composer-msg.ai.task {
+    border-left: 3px solid var(--accent); border-radius: 15px 15px 15px 5px;
+    display: flex; flex-direction: column; gap: 5px; max-width: 92%;
+  }
+  .task-tag {
+    display: inline-flex; align-items: center; gap: 5px; align-self: flex-start;
+    font-size: 9.5px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase;
+    color: var(--accent);
+  }
+  .composer-msg.ai.question { border-left: 3px solid #b8925a; border-radius: 15px 15px 15px 5px; }
+  .thinking-model {
+    font-size: 10px; color: var(--text-muted); opacity: 0.65;
+    border-left: 1px solid var(--border); padding-left: 8px;
+  }
+
   /* "it's working, and here's what it's working on" */
   .thinking { display: flex; align-items: center; gap: 9px; }
   .thinking-dots { display: flex; gap: 3px; flex: 0 0 auto; }
@@ -774,7 +791,11 @@
         '<span class="thinking-dots"><i></i><i></i><i></i></span>' +
         '<span class="thinking-stage">Working</span>' +
         '<span class="thinking-elapsed"></span>' +
+        '<span class="thinking-model"></span>' +
       '</span>';
+    // name the model that's actually chugging, so slowness is attributable
+    const modelEl = el.querySelector('.thinking-model');
+    if (activeModelLabel) modelEl.textContent = activeModelLabel;
     composerLogEl.appendChild(el);
     composerLogEl.scrollTop = composerLogEl.scrollHeight;
 
@@ -791,6 +812,40 @@
       if (stageEl) stageEl.textContent = stage;
       composerLogEl.scrollTop = composerLogEl.scrollHeight;
     };
+    return el;
+  }
+
+  // What each backend action is called when it's reported back as a task.
+  const TASK_LABELS = {
+    cut: 'Cut', seek: 'Jump to', effect: 'Adjust', import: 'Import',
+    transcribe: 'Transcript', search: 'Search', captions: 'Captions',
+    write_script: 'Script', motion_graphic: 'Motion graphic', export: 'Export',
+  };
+
+  // Three visually distinct kinds of reply, so it's clear at a glance
+  // whether the Director just talked, asked you something, or actually
+  // changed the project.
+  function addDirectorReply(response) {
+    const text = response.message || response.error || "Didn't catch that.";
+    if (response.error) return addComposerMessage('ai', text, { error: true });
+
+    const taskLabel = TASK_LABELS[response.action];
+    if (taskLabel) {
+      const el = document.createElement('div');
+      el.className = 'composer-msg ai task';
+      const tag = document.createElement('span');
+      tag.className = 'task-tag';
+      tag.textContent = '✓ ' + taskLabel;
+      el.appendChild(tag);
+      el.appendChild(document.createTextNode(text));
+      composerLogEl.appendChild(el);
+      composerLogEl.scrollTop = composerLogEl.scrollHeight;
+      return el;
+    }
+
+    // a follow-up question, vs. plain conversation
+    const el = addComposerMessage('ai', text);
+    if (response.awaiting) el.classList.add('question');
     return el;
   }
 
@@ -1380,19 +1435,34 @@
     chatSuggestionsEl.appendChild(chip);
   });
 
+  let activeModelLabel = '';
+
+  // Two steps on purpose. The name comes from settings and needs no
+  // network, so the badge shows the real model immediately instead of
+  // sitting on "Local AI" while a busy Ollama gets round to answering.
+  // Availability is checked after, and only adjusts the dot.
   async function refreshModelIndicator() {
-    const status = await window.pywebview.api.get_model_status();
-    if (!status) return;
-    modelIndicatorDotEl.classList.toggle('offline', !status.ollama_available);
-    if (!status.ollama_available) {
-      modelIndicatorLabelEl.textContent = 'AI offline';
-      return;
-    }
-    const known = status.known_models.find(m => m.id === status.active_model);
-    const name = known ? known.label : status.active_model;
-    modelIndicatorLabelEl.textContent = status.active_model_installed
-      ? `Local · ${name}`
-      : `Local · ${name} (not installed)`;
+    try {
+      const active = await window.pywebview.api.get_active_model();
+      if (active) {
+        activeModelLabel = active.label;
+        modelIndicatorLabelEl.textContent = `Local · ${active.label}`;
+      }
+    } catch (e) { /* leave whatever's showing */ }
+
+    try {
+      const status = await window.pywebview.api.get_model_status();
+      if (!status) return;
+      modelIndicatorDotEl.classList.toggle('offline', !status.ollama_available);
+      if (!status.ollama_available) {
+        modelIndicatorLabelEl.textContent = `${status.active_model_label || 'Local AI'} — Ollama offline`;
+        return;
+      }
+      activeModelLabel = status.active_model_label || activeModelLabel;
+      modelIndicatorLabelEl.textContent = status.active_model_installed
+        ? `Local · ${activeModelLabel}`
+        : `Local · ${activeModelLabel} (not installed)`;
+    } catch (e) { /* the name from step one is still correct */ }
   }
 
   async function newProjectFlow() {
@@ -1556,27 +1626,17 @@
   });
 
   async function openSettingsFlow() {
-    const settings = await window.pywebview.api.get_settings();
-    const modelStatus = await window.pywebview.api.get_model_status();
+    // Open first, fill in after. This used to await two backend calls
+    // before calling showModal, so while the AI was busy the button
+    // looked completely dead.
     showModal('Settings');
 
     const modelLabel = document.createElement('label');
     modelLabel.style.cssText = 'font-size:12px;color:var(--text-muted);display:block;';
-    modelLabel.textContent = modelStatus.ollama_available
-      ? 'Local AI model — powers the composer’s AI fallback, script writing, and motion graphics'
-      : 'Local AI model — Ollama isn’t running right now, so AI features are unavailable';
+    modelLabel.textContent = 'Local AI model — loading…';
     const modelSelect = document.createElement('select');
     modelSelect.style.cssText = 'width:100%;margin:6px 0 16px;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;';
-    modelStatus.known_models.forEach(m => {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      const installed = modelStatus.installed_models.includes(m.id);
-      opt.textContent = m.label + (installed ? '' : ' (not installed)');
-      if (m.id === modelStatus.active_model) opt.selected = true;
-      modelSelect.appendChild(opt);
-    });
-    modalBodyEl.appendChild(modelLabel);
-    modalBodyEl.appendChild(modelSelect);
+    modelSelect.disabled = true;
 
     const label = document.createElement('label');
     label.style.fontSize = '12px';
@@ -1585,20 +1645,49 @@
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = 'sk-...';
-    input.value = settings.api_key || '';
     input.style.marginTop = '8px';
+
+    modalBodyEl.appendChild(modelLabel);
+    modalBodyEl.appendChild(modelSelect);
     modalBodyEl.appendChild(label);
     modalBodyEl.appendChild(input);
-    setTimeout(() => input.focus(), 0);
 
     modalConfirmEl.textContent = 'Save';
     modalConfirmEl.onclick = async () => {
       await window.pywebview.api.set_api_key(input.value);
-      await window.pywebview.api.set_local_model(modelSelect.value);
+      if (modelSelect.value) await window.pywebview.api.set_local_model(modelSelect.value);
       hideModal();
       modalConfirmEl.textContent = 'Continue';
       refreshModelIndicator();
     };
+
+    // fire both before awaiting either — they're independent, and waiting
+    // on them in sequence doubled how long the modal sat half-empty
+    const settingsPromise = window.pywebview.api.get_settings();
+    const statusPromise = window.pywebview.api.get_model_status();
+
+    try {
+      const settings = await settingsPromise;
+      input.value = (settings && settings.api_key) || '';
+    } catch (e) { /* leave it blank */ }
+
+    try {
+      const status = await statusPromise;
+      modelLabel.textContent = status.ollama_available
+        ? 'Local AI model — powers the Director, script writing and motion graphics'
+        : 'Local AI model — Ollama isn’t running, so AI features are unavailable right now';
+      // every model actually installed, not just the ones this app names
+      (status.choices || []).forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.label + (m.installed ? '' : ' (not installed — run: ollama pull ' + m.id + ')');
+        if (m.id === status.active_model) opt.selected = true;
+        modelSelect.appendChild(opt);
+      });
+      modelSelect.disabled = false;
+    } catch (e) {
+      modelLabel.textContent = 'Local AI model — couldn’t read the model list.';
+    }
   }
 
   async function runComposerCommand() {
@@ -1615,7 +1704,7 @@
     if (!response) { clearThinkingBubble(pendingEl); return; }
 
     clearThinkingBubble(pendingEl);
-    addComposerMessage('ai', response.message || response.error || "Didn't catch that.", { error: !!response.error });
+    addDirectorReply(response);
 
     if (response.error) return; // unrecognized or failed — nothing else changed
 

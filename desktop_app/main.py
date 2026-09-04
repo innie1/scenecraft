@@ -730,7 +730,8 @@ class Api:
     # is not a general NLU/LLM, so unrecognized phrasing (e.g. "change the
     # color", "add effects" — there's no color/effects engine at all yet)
     # returns a clear "not supported" message instead of guessing.
-    def run_command(self, text: str, current_time: float = 0.0, selected_clip_id: str | None = None):
+    def run_command(self, text: str, current_time: float = 0.0, selected_clip_id: str | None = None,
+                    use_ai_fallback: bool = True):
         if not self.project:
             return {"error": "No project loaded."}
         raw = (text or "").strip()
@@ -891,7 +892,8 @@ class Api:
         # matched. Silently skipped if Ollama isn't running; the
         # deterministic patterns above always run first and are instant,
         # this never blocks or slows down the common case.
-        if llm_ops.is_available():
+        if use_ai_fallback and llm_ops.is_available():
+            self._progress("Reading the command")
             try:
                 interpretation = llm_ops.interpret_command(raw, model=self._active_model())
             except llm_ops.OllamaUnavailableError:
@@ -944,6 +946,8 @@ class Api:
         '- "captions" — they want captions or subtitles on the video.\n'
         '- "transcribe" — they want the speech transcribed to text.\n'
         '- "export" — they want to export, render or save out the video.\n'
+        '- "edit" — they want to change the video itself: cut, trim, jump to a '
+        'time, or change brightness/contrast/saturation/colour.\n'
         '- "unknown" — anything else.\n\n'
         "Examples:\n"
         '"hello" -> {"intent": "chat", "reply": "Hey! What are we making today?"}\n'
@@ -954,6 +958,8 @@ class Api:
         '"make me an animation" -> {"intent": "motion_graphic", "reply": "Sure."}\n'
         '"write me a script" -> {"intent": "script", "reply": "Happy to."}\n'
         '"put subtitles on this" -> {"intent": "captions", "reply": "On it."}\n'
+        '"trim the boring bit off the front" -> {"intent": "edit", "reply": "Sure."}\n'
+        '"warm the colours up a touch" -> {"intent": "edit", "reply": "Sure."}\n'
     )
 
     # Requests that need details we don't have yet become a short interview
@@ -983,15 +989,19 @@ class Api:
         if self.pending_flow:
             return self._continue_flow(text)
 
-        # 2. Exact commands keep the fast, deterministic, offline path.
-        result = self.run_command(text, current_time, selected_clip_id)
+        # 2. Exact commands keep the fast, deterministic, offline path. The
+        #    AI fallback is deliberately off here: _converse below already
+        #    makes a model call, and running both meant every message —
+        #    "hi" included — paid for two full inferences.
+        result = self.run_command(text, current_time, selected_clip_id, use_ai_fallback=False)
         if "error" not in result:
             return result
 
         # 3. Nothing matched — actually talk about it.
-        return self._converse(text, result["error"])
+        return self._converse(text, result["error"], current_time, selected_clip_id)
 
-    def _converse(self, text: str, fallback_error: str):
+    def _converse(self, text: str, fallback_error: str, current_time: float = 0.0,
+                  selected_clip_id: str | None = None):
         if not llm_ops.is_available():
             return {"action": "chat", "error": fallback_error}
         self._progress("Thinking")
@@ -1009,7 +1019,11 @@ class Api:
         # Intents that map straight onto an existing command need no details.
         passthrough = {"captions": "add captions", "transcribe": "transcribe", "export": "export"}
         if intent in passthrough:
-            return self.run_command(passthrough[intent], 0.0, None)
+            return self.run_command(passthrough[intent], 0.0, None, use_ai_fallback=False)
+        # Only an actual edit costs a second model call, to work out the
+        # numbers ("trim the first bit off" -> cut 0-3). Chat never does.
+        if intent == "edit":
+            return self.run_command(text, current_time, selected_clip_id, use_ai_fallback=True)
         if intent == "chat" and reply:
             return {"action": "chat", "message": reply}
         return {"action": "chat", "error": fallback_error}
@@ -1098,21 +1112,45 @@ class Api:
         SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
         return {"ok": True}
 
+    @staticmethod
+    def _model_label(model_id: str) -> str:
+        for known in AVAILABLE_LOCAL_MODELS:
+            if known["id"] == model_id:
+                return known["label"]
+        return model_id
+
+    def get_active_model(self):
+        """Just the selected model's name, read from settings with no
+        network call at all. The badge in the header uses this so it can
+        never sit on a placeholder waiting for a busy Ollama to answer."""
+        active = self._active_model()
+        return {"id": active, "label": self._model_label(active), "is_local": True}
+
     def get_model_status(self):
-        """Everything the UI needs to show which AI model is actually
-        active right now and whether it's local (it's always local —
-        this app makes no cloud AI calls) and actually installed, rather
-        than assuming the composer's AI fallback silently works."""
+        """The fuller picture: is Ollama reachable, what's actually
+        installed, and is the selected model among them. Touches the
+        network, so callers should render something useful without it."""
         available = llm_ops.is_available()
         installed = llm_ops.list_models() if available else []
         active = self._active_model()
+        # Offer every model actually installed, not just the two this app
+        # ships names for — anything pulled with `ollama pull` is usable.
+        choices = [
+            {"id": m, "label": self._model_label(m), "installed": True}
+            for m in installed
+        ]
+        for known in AVAILABLE_LOCAL_MODELS:
+            if known["id"] not in installed:
+                choices.append({"id": known["id"], "label": known["label"], "installed": False})
         return {
             "is_local": True,
             "ollama_available": available,
             "active_model": active,
+            "active_model_label": self._model_label(active),
             "active_model_installed": active in installed,
             "installed_models": installed,
             "known_models": AVAILABLE_LOCAL_MODELS,
+            "choices": choices,
         }
 
     # ---- guided recording: script -> scenes -> teleprompter -> capture ----
