@@ -58,6 +58,7 @@
   }
   header h1 { font-size: 15px; font-weight: 500; margin: 0; }
   .header-left { display: flex; align-items: center; gap: 10px; }
+  .header-center { flex: 1; display: flex; justify-content: center; }
   #back-btn { width: 30px; height: 30px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
   #back-btn svg { width: 16px; height: 16px; }
   #header-title { cursor: pointer; border-radius: 4px; padding: 2px 6px; margin: 0 -6px; }
@@ -66,6 +67,26 @@
     font-size: 15px; font-weight: 500; font-family: inherit; background: var(--panel);
     border: 1px solid var(--accent); color: var(--text); border-radius: 4px; padding: 2px 6px;
   }
+
+  /* CapCut-style manual/AI mode pill switch, centered in the header */
+  .mode-toggle {
+    display: flex; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 20px; padding: 3px; gap: 2px;
+  }
+  .mode-toggle-btn {
+    border: none; background: transparent; color: var(--text-muted);
+    padding: 6px 16px; border-radius: 16px; font-size: 12px; font-weight: 500;
+    cursor: pointer; transition: background 0.15s, color 0.15s;
+  }
+  .mode-toggle-btn:hover { border-color: transparent; color: var(--text); }
+  .mode-toggle-btn.active { background: var(--accent); color: #121212; }
+
+  .model-indicator {
+    display: flex; align-items: center; gap: 6px; padding: 6px 12px;
+    border-radius: 14px; font-size: 11px; color: var(--text-muted);
+  }
+  .model-indicator-dot { width: 7px; height: 7px; border-radius: 50%; background: #6fcf7a; flex: 0 0 auto; }
+  .model-indicator-dot.offline { background: #8a8a86; }
 
   .editor-main {
     flex: 1;
@@ -76,6 +97,15 @@
     overflow: hidden;
     min-height: 0;
   }
+
+  /* AI Mode: the composer takes over, manual tools get out of the way */
+  .editor-main.ai-mode .tool-rail-vertical,
+  .editor-main.ai-mode .trim-controls { display: none; }
+  .editor-main.ai-mode .composer-bar { width: 85%; }
+  .editor-main.ai-mode .composer-log { max-height: 420px; }
+  .editor-main.ai-mode #composer-input { font-size: 14px; padding: 10px 0; }
+  .editor-main.ai-mode .composer-input-wrap { padding: 6px 6px 6px 20px; }
+  .editor-main.ai-mode .composer-send-btn { width: 38px; height: 38px; }
 
   /* Top row: narrow icon rail + preview/transcript, side by side */
   .editor-top { display: flex; gap: 10px; flex: 1; min-height: 0; }
@@ -293,7 +323,17 @@
       </button>
       <h1 id="header-title">Scenecraft</h1>
     </div>
+    <div class="header-center">
+      <div class="mode-toggle" role="group" aria-label="Edit mode">
+        <button id="mode-manual-btn" class="mode-toggle-btn active" data-mode="manual">Manual Edit</button>
+        <button id="mode-ai-btn" class="mode-toggle-btn" data-mode="ai">AI Mode</button>
+      </div>
+    </div>
     <div class="header-right">
+      <button id="model-indicator-btn" class="model-indicator" title="Local AI model — click to change">
+        <span id="model-indicator-dot" class="model-indicator-dot"></span>
+        <span id="model-indicator-label">Local AI</span>
+      </button>
       <select id="aspect-ratio-select" title="Export frame size">
         <option value="auto">Auto (source)</option>
         <option value="16:9">16:9 landscape</option>
@@ -544,6 +584,12 @@
     return el;
   }
   const aspectRatioSelectEl = document.getElementById('aspect-ratio-select');
+  const editorMainEl = document.querySelector('.editor-main');
+  const modeManualBtnEl = document.getElementById('mode-manual-btn');
+  const modeAiBtnEl = document.getElementById('mode-ai-btn');
+  const modelIndicatorBtnEl = document.getElementById('model-indicator-btn');
+  const modelIndicatorDotEl = document.getElementById('model-indicator-dot');
+  const modelIndicatorLabelEl = document.getElementById('model-indicator-label');
 
   let currentTranscript = [];
   let currentTracks = [];
@@ -849,6 +895,31 @@
 
     statusEl.textContent = '';
     showScreen('editor');
+    refreshModelIndicator();
+  }
+
+  let editMode = 'manual';
+  function setEditMode(mode) {
+    editMode = mode;
+    editorMainEl.classList.toggle('ai-mode', mode === 'ai');
+    modeManualBtnEl.classList.toggle('active', mode === 'manual');
+    modeAiBtnEl.classList.toggle('active', mode === 'ai');
+    if (mode === 'ai') setTimeout(() => composerInputEl.focus(), 0);
+  }
+
+  async function refreshModelIndicator() {
+    const status = await window.pywebview.api.get_model_status();
+    if (!status) return;
+    modelIndicatorDotEl.classList.toggle('offline', !status.ollama_available);
+    if (!status.ollama_available) {
+      modelIndicatorLabelEl.textContent = 'AI offline';
+      return;
+    }
+    const known = status.known_models.find(m => m.id === status.active_model);
+    const name = known ? known.label : status.active_model;
+    modelIndicatorLabelEl.textContent = status.active_model_installed
+      ? `Local · ${name}`
+      : `Local · ${name} (not installed)`;
   }
 
   async function newProjectFlow() {
@@ -979,12 +1050,31 @@
 
   async function openSettingsFlow() {
     const settings = await window.pywebview.api.get_settings();
+    const modelStatus = await window.pywebview.api.get_model_status();
     showModal('Settings');
+
+    const modelLabel = document.createElement('label');
+    modelLabel.style.cssText = 'font-size:12px;color:var(--text-muted);display:block;';
+    modelLabel.textContent = modelStatus.ollama_available
+      ? 'Local AI model — powers the composer’s AI fallback, script writing, and motion graphics'
+      : 'Local AI model — Ollama isn’t running right now, so AI features are unavailable';
+    const modelSelect = document.createElement('select');
+    modelSelect.style.cssText = 'width:100%;margin:6px 0 16px;background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:6px;padding:6px 8px;';
+    modelStatus.known_models.forEach(m => {
+      const opt = document.createElement('option');
+      opt.value = m.id;
+      const installed = modelStatus.installed_models.includes(m.id);
+      opt.textContent = m.label + (installed ? '' : ' (not installed)');
+      if (m.id === modelStatus.active_model) opt.selected = true;
+      modelSelect.appendChild(opt);
+    });
+    modalBodyEl.appendChild(modelLabel);
+    modalBodyEl.appendChild(modelSelect);
 
     const label = document.createElement('label');
     label.style.fontSize = '12px';
     label.style.color = 'var(--text-muted)';
-    label.textContent = 'API key (stored locally only — nothing in the app sends this anywhere yet; this is a slot for an AI-assisted mode that isn’t built yet)';
+    label.textContent = 'API key (stored locally only — nothing in the app sends this anywhere; every AI feature here runs on the local model above, not this key)';
     const input = document.createElement('input');
     input.type = 'text';
     input.placeholder = 'sk-...';
@@ -997,8 +1087,10 @@
     modalConfirmEl.textContent = 'Save';
     modalConfirmEl.onclick = async () => {
       await window.pywebview.api.set_api_key(input.value);
+      await window.pywebview.api.set_local_model(modelSelect.value);
       hideModal();
       modalConfirmEl.textContent = 'Continue';
+      refreshModelIndicator();
     };
   }
 
@@ -1235,6 +1327,9 @@
   document.getElementById('cut-btn').addEventListener('click', cutScene);
   document.getElementById('transcribe-btn').addEventListener('click', toggleTranscribe);
   document.getElementById('settings-btn').addEventListener('click', openSettingsFlow);
+  modelIndicatorBtnEl.addEventListener('click', openSettingsFlow);
+  modeManualBtnEl.addEventListener('click', () => setEditMode('manual'));
+  modeAiBtnEl.addEventListener('click', () => setEditMode('ai'));
   aspectRatioSelectEl.addEventListener('change', async () => {
     const result = await window.pywebview.api.set_aspect_ratio(aspectRatioSelectEl.value);
     if (result.error) { alert(result.error); return; }

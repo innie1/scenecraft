@@ -26,6 +26,14 @@ from core_engine import ffmpeg_ops, project_state, whisper_ops, script_ops, llm_
 SCENECRAFT_ROOT = Path.home() / "Scenecraft"
 SETTINGS_PATH = SCENECRAFT_ROOT / "settings.json"
 
+# Local models the picker offers. Not every entry is necessarily pulled —
+# get_model_status() cross-references this against llm_ops.list_models()
+# so the UI can show "(not installed)" rather than silently doing nothing.
+AVAILABLE_LOCAL_MODELS = [
+    {"id": "qwen2.5-coder:3b", "label": "Qwen2.5 Coder 3B"},
+    {"id": "gemma4:e2b-it-q4_K_M", "label": "Gemma 4 (e2b)"},
+]
+
 
 def _strip_markdown_fences(text: str) -> str:
     """Local models wrap code in ```html fences more often than not,
@@ -630,7 +638,7 @@ class Api:
             return {"error": "Local AI (Ollama) isn't running. Install/start Ollama to generate motion graphics."}
 
         try:
-            html = llm_ops.generate(description.strip(), system=self._MOTION_GRAPHIC_SYSTEM_PROMPT)
+            html = llm_ops.generate(description.strip(), system=self._MOTION_GRAPHIC_SYSTEM_PROMPT, model=self._active_model())
         except llm_ops.OllamaUnavailableError as e:
             return {"error": str(e)}
         html = _strip_markdown_fences(html)
@@ -817,7 +825,7 @@ class Api:
         # this never blocks or slows down the common case.
         if llm_ops.is_available():
             try:
-                interpretation = llm_ops.interpret_command(raw)
+                interpretation = llm_ops.interpret_command(raw, model=self._active_model())
             except llm_ops.OllamaUnavailableError:
                 interpretation = {"action": "unknown"}
             action = interpretation.get("action")
@@ -859,14 +867,45 @@ class Api:
 
     def set_api_key(self, api_key: str):
         """Stores an API key locally in ~/Scenecraft/settings.json. Nothing
-        in the app currently sends this anywhere — the composer's command
-        interpreter is fully local/offline (see run_command). This exists
-        so a key can be entered ahead of an AI-assisted mode being built."""
+        in the app currently sends this anywhere — every AI feature here
+        (composer fallback, script writing, motion graphics) runs on the
+        local model selected via set_local_model, not this key."""
         settings = self.get_settings()
         settings["api_key"] = api_key.strip()
         SCENECRAFT_ROOT.mkdir(parents=True, exist_ok=True)
         SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
         return {"ok": True}
+
+    def _active_model(self) -> str:
+        return self.get_settings().get("local_model") or llm_ops.DEFAULT_MODEL
+
+    def set_local_model(self, model_id: str):
+        """Persists which local Ollama model the composer fallback, script
+        writing, and motion-graphics generation should use. Doesn't check
+        that it's actually installed — a bad choice just surfaces as a
+        normal Ollama error on the next call, same as any other model."""
+        settings = self.get_settings()
+        settings["local_model"] = model_id
+        SCENECRAFT_ROOT.mkdir(parents=True, exist_ok=True)
+        SETTINGS_PATH.write_text(json.dumps(settings, indent=2))
+        return {"ok": True}
+
+    def get_model_status(self):
+        """Everything the UI needs to show which AI model is actually
+        active right now and whether it's local (it's always local —
+        this app makes no cloud AI calls) and actually installed, rather
+        than assuming the composer's AI fallback silently works."""
+        available = llm_ops.is_available()
+        installed = llm_ops.list_models() if available else []
+        active = self._active_model()
+        return {
+            "is_local": True,
+            "ollama_available": available,
+            "active_model": active,
+            "active_model_installed": active in installed,
+            "installed_models": installed,
+            "known_models": AVAILABLE_LOCAL_MODELS,
+        }
 
     # ---- guided recording: script -> scenes -> teleprompter -> capture ----
     def set_script(self, raw_text: str):
@@ -912,7 +951,7 @@ class Api:
         if not llm_ops.is_available():
             return {"error": "Local AI (Ollama) isn't running. Install/start Ollama to write a script."}
         try:
-            raw = llm_ops.generate(topic.strip(), system=self._SCRIPT_WRITER_SYSTEM_PROMPT)
+            raw = llm_ops.generate(topic.strip(), system=self._SCRIPT_WRITER_SYSTEM_PROMPT, model=self._active_model())
         except llm_ops.OllamaUnavailableError as e:
             return {"error": str(e)}
         raw = _strip_markdown_fences(raw)
