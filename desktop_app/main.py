@@ -779,6 +779,17 @@ class Api:
             result = self.transcribe()
             return {"action": "transcribe", "message": "Transcribed." if "error" not in result else result["error"], "result": result}
 
+        # "write a script about X" / "write me a script for X" / "create a script about X"
+        m = re.search(r"\bwrite\b(?:\s+me)?\s+a\s+script\s+(?:about|for|on)\s+(.+)$", t) or \
+            re.search(r"\b(?:create|generate)\s+a\s+script\s+(?:about|for|on)\s+(.+)$", t)
+        if m:
+            topic = raw[m.start(1):m.end(1)]
+            result = self.write_script(topic)
+            if "error" in result:
+                return {"action": "write_script", "message": result["error"], "result": result}
+            n = len(result["script"])
+            return {"action": "write_script", "message": f"Wrote a {n}-scene script about {topic!r}. Open the Script panel to review it.", "result": result}
+
         # "search for X" / "find X" / "find where I said X"
         m = re.search(r"\b(?:search|find)\b(?:\s+for)?\s+(?:where\s+i\s+said\s+)?(.+)$", t)
         if m:
@@ -874,6 +885,38 @@ class Api:
         self.project.script = [project_state.ScriptScene(**s) for s in scenes]
         self._save_project()
         return {"ok": True, "script": [vars(s) for s in self.project.script]}
+
+    _SCRIPT_WRITER_SYSTEM_PROMPT = (
+        "You write a short video script for someone to record themselves reading "
+        "on camera. Format it EXACTLY like this, with a blank line between scenes:\n\n"
+        "Scene 1:\n[smile warmly, speak slowly]\nWhat to say, as natural spoken sentences.\n\n"
+        "Scene 2:\n[lean in, sound excited]\nMore spoken lines.\n\n"
+        "Every scene needs its own bracketed direction describing HOW to deliver that "
+        "specific scene's lines (tone, pace, gesture, expression) — never reuse the same "
+        "words 'direction' or 'acting' as the direction itself, and never repeat the exact "
+        "same bracketed text across two scenes. Write 3 to 6 scenes. Keep each scene's "
+        "spoken lines short — a sentence or two, the length someone can actually say in one "
+        "take. Reply with ONLY the script in that format, no title, no explanation before or "
+        "after it."
+    )
+
+    def write_script(self, topic: str):
+        """The local model writes a script for the given topic/description
+        (not the whisper transcript's script_ops parser — this generates
+        new spoken lines from scratch), formatted for set_script() to
+        parse straight into scenes ready for guided recording."""
+        if not self.project:
+            return {"error": "No project loaded."}
+        if not topic or not topic.strip():
+            return {"error": "Say what the script should be about."}
+        if not llm_ops.is_available():
+            return {"error": "Local AI (Ollama) isn't running. Install/start Ollama to write a script."}
+        try:
+            raw = llm_ops.generate(topic.strip(), system=self._SCRIPT_WRITER_SYSTEM_PROMPT)
+        except llm_ops.OllamaUnavailableError as e:
+            return {"error": str(e)}
+        raw = _strip_markdown_fences(raw)
+        return self.set_script(raw)
 
     def create_upload_slot(self, scene_id: str):
         """Registers a one-time destination for the next recording
