@@ -131,7 +131,27 @@
   }
   .composer-send-btn:hover { opacity: 0.82; border-color: transparent; }
   .composer-send-btn svg { width: 15px; height: 15px; transform: translateX(-1px); }
-  #composer-status { font-size: 12px; color: var(--text-muted); padding-left: 16px; min-height: 14px; }
+
+  .composer-log {
+    display: flex; flex-direction: column; gap: 6px;
+    max-height: 240px; overflow-y: auto;
+    padding: 2px 4px;
+  }
+  .composer-log:empty { display: none; }
+  .composer-msg {
+    max-width: 82%; padding: 8px 13px; border-radius: 15px; font-size: 13px;
+    line-height: 1.42; white-space: pre-wrap; word-break: break-word;
+  }
+  .composer-msg.user {
+    align-self: flex-end; background: var(--accent); color: #121212;
+    border-bottom-right-radius: 4px;
+  }
+  .composer-msg.ai {
+    align-self: flex-start; background: var(--panel-raised); border: 1px solid var(--border);
+    color: var(--text); border-bottom-left-radius: 4px;
+  }
+  .composer-msg.ai.pending { color: var(--text-muted); font-style: italic; }
+  .composer-msg.ai.error { border-color: #b5544f; color: #e8b4b0; }
 
   #settings-btn { width: 30px; height: 30px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
   #settings-btn svg { width: 16px; height: 16px; }
@@ -377,9 +397,10 @@
     </div>
 
     <div class="composer-bar">
+      <div id="composer-log" class="composer-log"></div>
       <div class="composer-input-wrap">
         <input id="composer-input" type="text"
-               placeholder='Type an edit, e.g. "cut the first 5 seconds", "generate a motion graphic of a bouncing logo", "export"' />
+               placeholder='Type an edit, e.g. "cut the first 5 seconds", "write a script about morning routines", "export"' />
         <button id="composer-send" class="composer-send-btn" title="Send">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -387,7 +408,6 @@
           </svg>
         </button>
       </div>
-      <span id="composer-status"></span>
     </div>
   </main>
 </div>
@@ -513,7 +533,16 @@
   const startInputEl = document.getElementById('start');
   const endInputEl = document.getElementById('end');
   const composerInputEl = document.getElementById('composer-input');
-  const composerStatusEl = document.getElementById('composer-status');
+  const composerLogEl = document.getElementById('composer-log');
+
+  function addComposerMessage(role, text, opts) {
+    const el = document.createElement('div');
+    el.className = `composer-msg ${role}` + (opts && opts.pending ? ' pending' : '') + (opts && opts.error ? ' error' : '');
+    el.textContent = text;
+    composerLogEl.appendChild(el);
+    composerLogEl.scrollTop = composerLogEl.scrollHeight;
+    return el;
+  }
   const aspectRatioSelectEl = document.getElementById('aspect-ratio-select');
 
   let currentTranscript = [];
@@ -977,11 +1006,14 @@
     const text = composerInputEl.value.trim();
     if (!text) return;
     composerInputEl.value = '';
-    composerStatusEl.textContent = 'Working…';
+    addComposerMessage('user', text);
+    const pendingEl = addComposerMessage('ai', 'Working…', { pending: true });
 
     const response = await window.pywebview.api.run_command(text, previewEl.currentTime || 0, selectedClipId);
-    if (!response) return;
-    composerStatusEl.textContent = response.message || response.error || '';
+    if (!response) { pendingEl.remove(); return; }
+
+    pendingEl.remove();
+    addComposerMessage('ai', response.message || response.error || "Didn't catch that.", { error: !!response.error });
 
     if (response.error) return; // unrecognized or failed — nothing else changed
 
