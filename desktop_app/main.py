@@ -195,6 +195,9 @@ class Api:
         self.project: project_state.Project | None = None
         self.project_path: str | None = None
         self.media_port = media_port
+        # set while the assistant is waiting on an answer to something it
+        # asked (see chat()); None means no question is outstanding
+        self.pending_flow: dict | None = None
 
     def _media_url(self, path: str | None) -> str | None:
         if not path:
@@ -855,6 +858,145 @@ class Api:
                 "running, phrasings close to these are also understood even if not word-for-word."
             )
         }
+
+    # ---- conversation: the Director talks, it doesn't just parse ----
+    #
+    # run_command above is a fixed phrasebook — great when you know the
+    # phrasing, useless for "hello" or a half-formed idea. chat() wraps it:
+    # exact commands still hit the instant offline path, anything else gets
+    # a real reply, and requests that are missing details become questions
+    # instead of errors.
+
+    _CHAT_SYSTEM_PROMPT = (
+        "You are the assistant inside a video editing app. Reply with ONLY a JSON "
+        "object — no prose, no markdown fences.\n\n"
+        'Shape: {"intent": <intent>, "reply": <one or two short friendly sentences>}\n\n'
+        "Intents:\n"
+        '- "chat" — greetings, thanks, small talk, or a general question. Put your '
+        'actual conversational answer in "reply".\n'
+        '- "motion_graphic" — they want an animation or motion graphic made.\n'
+        '- "script" — they want a script written.\n'
+        '- "captions" — they want captions or subtitles on the video.\n'
+        '- "transcribe" — they want the speech transcribed to text.\n'
+        '- "export" — they want to export, render or save out the video.\n'
+        '- "unknown" — anything else.\n\n'
+        "Examples:\n"
+        '"hello" -> {"intent": "chat", "reply": "Hey! What are we making today?"}\n'
+        '"how are you?" -> {"intent": "chat", "reply": "Doing well and ready to edit. What do you need?"}\n'
+        '"what can you do" -> {"intent": "chat", "reply": "I can write scripts, cut clips, add captions, build motion graphics and export."}\n'
+        '"thanks" -> {"intent": "chat", "reply": "Anytime."}\n'
+        '"generate a motion graphic" -> {"intent": "motion_graphic", "reply": "Sure."}\n'
+        '"make me an animation" -> {"intent": "motion_graphic", "reply": "Sure."}\n'
+        '"write me a script" -> {"intent": "script", "reply": "Happy to."}\n'
+        '"put subtitles on this" -> {"intent": "captions", "reply": "On it."}\n'
+    )
+
+    # Requests that need details we don't have yet become a short interview
+    # rather than an error. Each entry is the questions to ask, in order.
+    _FLOWS = {
+        "motion_graphic": [
+            ("description", "What should the motion graphic show?"),
+            ("style", "Any particular style or colours? (say \"skip\" for a clean default)"),
+        ],
+        "script": [
+            ("topic", "What should the script be about?"),
+        ],
+    }
+
+    _CANCEL_WORDS = {"cancel", "never mind", "nevermind", "stop", "forget it", "no"}
+    _SKIP_WORDS = {"skip", "none", "no preference", "whatever", "any", "you choose", "up to you"}
+
+    def chat(self, message: str, current_time: float = 0.0, selected_clip_id: str | None = None):
+        """Single entry point for the Director panel."""
+        text = (message or "").strip()
+        if not text:
+            return {"action": "chat", "message": ""}
+        if not self.project:
+            return {"action": "chat", "error": "No project loaded."}
+
+        # 1. A question is outstanding — this message answers it.
+        if self.pending_flow:
+            return self._continue_flow(text)
+
+        # 2. Exact commands keep the fast, deterministic, offline path.
+        result = self.run_command(text, current_time, selected_clip_id)
+        if "error" not in result:
+            return result
+
+        # 3. Nothing matched — actually talk about it.
+        return self._converse(text, result["error"])
+
+    def _converse(self, text: str, fallback_error: str):
+        if not llm_ops.is_available():
+            return {"action": "chat", "error": fallback_error}
+        try:
+            raw = llm_ops.generate(text, system=self._CHAT_SYSTEM_PROMPT, model=self._active_model())
+        except llm_ops.OllamaUnavailableError:
+            return {"action": "chat", "error": fallback_error}
+
+        parsed = llm_ops._extract_json(raw) or {}
+        intent = str(parsed.get("intent") or "unknown").strip()
+        reply = str(parsed.get("reply") or "").strip()
+
+        if intent in self._FLOWS:
+            return self._start_flow(intent, reply)
+        # Intents that map straight onto an existing command need no details.
+        passthrough = {"captions": "add captions", "transcribe": "transcribe", "export": "export"}
+        if intent in passthrough:
+            return self.run_command(passthrough[intent], 0.0, None)
+        if intent == "chat" and reply:
+            return {"action": "chat", "message": reply}
+        return {"action": "chat", "error": fallback_error}
+
+    def _start_flow(self, name: str, preamble: str = ""):
+        self.pending_flow = {"name": name, "slots": {}, "index": 0}
+        slot, question = self._FLOWS[name][0]
+        # the model's own "Sure." reads as filler in front of a question
+        return {"action": "chat", "message": question, "awaiting": slot}
+
+    def _continue_flow(self, text: str):
+        flow = self.pending_flow
+        questions = self._FLOWS[flow["name"]]
+        slot, _ = questions[flow["index"]]
+
+        if text.strip().lower() in self._CANCEL_WORDS:
+            self.pending_flow = None
+            return {"action": "chat", "message": "No problem — dropped it. What else?"}
+
+        flow["slots"][slot] = "" if text.strip().lower() in self._SKIP_WORDS else text.strip()
+        flow["index"] += 1
+
+        if flow["index"] < len(questions):
+            next_slot, next_question = questions[flow["index"]]
+            return {"action": "chat", "message": next_question, "awaiting": next_slot}
+
+        slots = flow["slots"]
+        self.pending_flow = None
+        return self._run_flow(flow["name"], slots)
+
+    def _run_flow(self, name: str, slots: dict):
+        if name == "motion_graphic":
+            description = slots.get("description", "")
+            style = slots.get("style", "")
+            if style:
+                description = f"{description}, in this style: {style}"
+            result = self.generate_motion_graphic(description)
+            message = ("Made it — it's on the timeline."
+                       if "error" not in result else result["error"])
+            return {"action": "motion_graphic", "message": message, "result": result}
+
+        if name == "script":
+            result = self.write_script(slots.get("topic", ""))
+            if "error" in result:
+                return {"action": "write_script", "message": result["error"], "result": result}
+            n = len(result["script"])
+            return {
+                "action": "write_script",
+                "message": f"Wrote a {n}-scene script. Open Script & record to shoot it.",
+                "result": result,
+            }
+
+        return {"action": "chat", "error": f"Don't know how to finish {name!r}."}
 
     # ---- settings: local-only storage, e.g. for a future API key ----
     def get_settings(self):
