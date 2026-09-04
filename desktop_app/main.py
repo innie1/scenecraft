@@ -199,6 +199,20 @@ class Api:
         # asked (see chat()); None means no question is outstanding
         self.pending_flow: dict | None = None
 
+    def _progress(self, stage: str):
+        """Tell the UI what this call is actually doing right now.
+
+        Everything the Director does is one blocking bridge call, so
+        without this the user stares at a spinner for a minute with no
+        idea whether it's thinking, rendering or encoding. Best-effort by
+        design: if there's no window (tests, headless runs) or the bridge
+        is busy, progress reporting must never break the actual work."""
+        try:
+            js = f"window.scenecraftProgress && window.scenecraftProgress({json.dumps(stage)})"
+            webview.windows[0].evaluate_js(js)
+        except Exception:
+            pass
+
     def _media_url(self, path: str | None) -> str | None:
         if not path:
             return None
@@ -440,6 +454,7 @@ class Api:
         out_dir = SCENECRAFT_ROOT / self.project.name / "scenes"
         scene_id = f"scene_{len(video_track.clips) + 1}"
         out_path = str(out_dir / f"{scene_id}.mp4")
+        self._progress("Cutting the clip")
         try:
             ffmpeg_ops.cut_clip(self.project.source_video, out_path, start, end)
         except Exception as e:
@@ -542,6 +557,7 @@ class Api:
             return {"error": "No project loaded."}
         if not self.project.source_video:
             return {"error": "Import a video first."}
+        self._progress("Transcribing the audio")
         try:
             segments = whisper_ops.transcribe(self.project.source_video)
         except Exception as e:
@@ -608,6 +624,7 @@ class Api:
         if not result:
             return None
         out_path = result[0] if isinstance(result, (list, tuple)) else result
+        self._progress("Rendering the final video")
         try:
             ffmpeg_ops.export(self.project, out_path)
         except Exception as e:
@@ -640,6 +657,7 @@ class Api:
         if not llm_ops.is_available():
             return {"error": "Local AI (Ollama) isn't running. Install/start Ollama to generate motion graphics."}
 
+        self._progress("Designing the animation")
         try:
             html = llm_ops.generate(description.strip(), system=self._MOTION_GRAPHIC_SYSTEM_PROMPT, model=self._active_model())
         except llm_ops.OllamaUnavailableError as e:
@@ -650,6 +668,7 @@ class Api:
 
         out_dir = SCENECRAFT_ROOT / self.project.name / "motion_graphics"
         out_path = str(out_dir / f"motiongraphic_{uuid.uuid4().hex[:8]}.mp4")
+        self._progress("Rendering frames")
         try:
             motion_graphics_ops.render_html_animation(html, out_path, duration=duration)
         except Exception as e:
@@ -929,6 +948,7 @@ class Api:
     def _converse(self, text: str, fallback_error: str):
         if not llm_ops.is_available():
             return {"action": "chat", "error": fallback_error}
+        self._progress("Thinking")
         try:
             raw = llm_ops.generate(text, system=self._CHAT_SYSTEM_PROMPT, model=self._active_model())
         except llm_ops.OllamaUnavailableError:
@@ -1092,6 +1112,7 @@ class Api:
             return {"error": "Say what the script should be about."}
         if not llm_ops.is_available():
             return {"error": "Local AI (Ollama) isn't running. Install/start Ollama to write a script."}
+        self._progress("Writing the script")
         try:
             raw = llm_ops.generate(topic.strip(), system=self._SCRIPT_WRITER_SYSTEM_PROMPT, model=self._active_model())
         except llm_ops.OllamaUnavailableError as e:

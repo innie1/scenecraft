@@ -271,8 +271,24 @@
     align-self: flex-start; background: var(--panel-raised); border: 1px solid var(--border);
     color: var(--text); border-bottom-left-radius: 4px;
   }
-  .composer-msg.ai.pending { color: var(--text-muted); font-style: italic; }
+  .composer-msg.ai.pending { color: var(--text-muted); }
   .composer-msg.ai.error { border-color: #b5544f; color: #e8b4b0; }
+
+  /* "it's working, and here's what it's working on" */
+  .thinking { display: flex; align-items: center; gap: 9px; }
+  .thinking-dots { display: flex; gap: 3px; flex: 0 0 auto; }
+  .thinking-dots i {
+    width: 5px; height: 5px; border-radius: 50%; background: var(--text-muted);
+    animation: thinking-bounce 1.25s infinite ease-in-out;
+  }
+  .thinking-dots i:nth-child(2) { animation-delay: 0.16s; }
+  .thinking-dots i:nth-child(3) { animation-delay: 0.32s; }
+  @keyframes thinking-bounce {
+    0%, 70%, 100% { opacity: 0.25; transform: translateY(0); }
+    35% { opacity: 1; transform: translateY(-3px); }
+  }
+  .thinking-stage { font-style: italic; }
+  .thinking-elapsed { color: var(--text-muted); opacity: 0.7; font-variant-numeric: tabular-nums; }
 
   #settings-btn { width: 30px; height: 30px; padding: 0; display: flex; align-items: center; justify-content: center; border-radius: 6px; }
   #settings-btn svg { width: 16px; height: 16px; }
@@ -294,14 +310,32 @@
   .timeline-ruler span {
     position: absolute; top: 3px; font-size: 10px; color: var(--text-muted); white-space: nowrap;
   }
+  /* The playhead is the thing that decides where a cut happens, so it's
+     drawn loudly: a grab handle, a live time label, and a wide invisible
+     hit strip so a 2px line is still easy to grab. */
   .timeline-playhead {
     position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent);
-    z-index: 5; cursor: ew-resize; pointer-events: auto;
+    z-index: 6; cursor: ew-resize; pointer-events: auto;
+  }
+  .timeline-playhead::after {
+    content: ''; position: absolute; top: 0; bottom: 0; left: -6px; right: -6px;
   }
   .timeline-playhead::before {
-    content: ''; position: absolute; top: -1px; left: -4px; width: 10px; height: 10px;
+    content: ''; position: absolute; top: 0; left: -5px; width: 12px; height: 12px;
     background: var(--accent); border-radius: 2px;
   }
+  .playhead-time {
+    position: absolute; top: 15px; left: 7px; font-size: 10px; line-height: 1;
+    background: var(--accent); color: #121212; padding: 2px 5px; border-radius: 3px;
+    font-variant-numeric: tabular-nums; white-space: nowrap; pointer-events: none;
+  }
+  /* the span the Cut button will actually take, shown on the timeline */
+  .timeline-range {
+    position: absolute; top: 0; bottom: 0; z-index: 1; pointer-events: none;
+    background: rgba(127, 119, 221, 0.15);
+    border-left: 1px dashed var(--accent); border-right: 1px dashed var(--accent);
+  }
+  .timeline-range.empty { display: none; }
   /* One timeline. Clips of every kind share it and only stack when they
      genuinely overlap in time, so there are no permanent empty lanes. */
   .timeline-lane { position: relative; min-height: 44px; }
@@ -574,7 +608,10 @@
       </div>
 
       <div class="timeline-scroll">
-        <div id="timeline-playhead" class="timeline-playhead"></div>
+        <div id="timeline-range" class="timeline-range empty"></div>
+        <div id="timeline-playhead" class="timeline-playhead">
+          <span id="playhead-time" class="playhead-time">0:00.0</span>
+        </div>
         <div id="timeline-ruler" class="timeline-ruler"></div>
         <div id="timeline-lane" class="timeline-lane"></div>
       </div>
@@ -680,6 +717,8 @@
   // consolidated timeupdate/seeked handler further down)
   const statusEl = document.getElementById('status');
   const timelineRulerEl = document.getElementById('timeline-ruler');
+  const timelineRangeEl = document.getElementById('timeline-range');
+  const playheadTimeEl = document.getElementById('playhead-time');
   const timelineScrollEl = document.querySelector('.timeline-scroll');
   const timelinePlayheadEl = document.getElementById('timeline-playhead');
   const timelineLaneEl = document.getElementById('timeline-lane');
@@ -719,6 +758,47 @@
     composerLogEl.appendChild(el);
     composerLogEl.scrollTop = composerLogEl.scrollHeight;
     return el;
+  }
+
+  // A working bubble that says what it's actually doing. The backend calls
+  // window.scenecraftProgress() as it moves between real stages (thinking,
+  // writing the script, rendering frames, encoding...), and the elapsed
+  // counter keeps ticking so a slow local model never looks frozen.
+  let thinkingTimer = null;
+
+  function addThinkingBubble() {
+    const el = document.createElement('div');
+    el.className = 'composer-msg ai pending';
+    el.innerHTML =
+      '<span class="thinking">' +
+        '<span class="thinking-dots"><i></i><i></i><i></i></span>' +
+        '<span class="thinking-stage">Working</span>' +
+        '<span class="thinking-elapsed"></span>' +
+      '</span>';
+    composerLogEl.appendChild(el);
+    composerLogEl.scrollTop = composerLogEl.scrollHeight;
+
+    const startedAt = Date.now();
+    const elapsedEl = el.querySelector('.thinking-elapsed');
+    clearInterval(thinkingTimer);
+    thinkingTimer = setInterval(() => {
+      const secs = Math.round((Date.now() - startedAt) / 1000);
+      elapsedEl.textContent = secs >= 3 ? `${secs}s` : '';
+    }, 500);
+
+    window.scenecraftProgress = stage => {
+      const stageEl = el.querySelector('.thinking-stage');
+      if (stageEl) stageEl.textContent = stage;
+      composerLogEl.scrollTop = composerLogEl.scrollHeight;
+    };
+    return el;
+  }
+
+  function clearThinkingBubble(el) {
+    clearInterval(thinkingTimer);
+    thinkingTimer = null;
+    window.scenecraftProgress = null;
+    if (el) el.remove();
   }
   const aspectRatioSelectEl = document.getElementById('aspect-ratio-select');
   const editorMainEl = document.querySelector('.editor-main');
@@ -803,9 +883,24 @@
 
   // ---- timeline playhead: synced to the video, click/drag to scrub ----
   // No track-label gutter any more, so timeline x maps straight to time.
+  function formatTimePrecise(seconds) {
+    const s = Math.max(0, seconds);
+    return `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
+  }
+
   function updatePlayheadPosition() {
     const t = previewEl.currentTime || 0;
     timelinePlayheadEl.style.left = (t * PX_PER_SEC) + 'px';
+    playheadTimeEl.textContent = formatTimePrecise(t);
+  }
+
+  // Draw the in/out span on the timeline itself, so it's obvious that the
+  // line is what decides where Cut happens.
+  function updateRangeBand() {
+    const width = (outPoint - inPoint) * PX_PER_SEC;
+    timelineRangeEl.classList.toggle('empty', !(width > 0));
+    timelineRangeEl.style.left = (inPoint * PX_PER_SEC) + 'px';
+    timelineRangeEl.style.width = Math.max(0, width) + 'px';
   }
   // ---- custom transport (the native <video controls> bar is gone) ----
   function updateTransport() {
@@ -859,7 +954,11 @@
     previewEl.currentTime = Math.max(0, contentX / PX_PER_SEC);
   }
 
-  timelineRulerEl.addEventListener('click', e => {
+  // Click anywhere on the timeline — ruler, empty space, or a clip — and the
+  // playhead goes there. It used to only respond on the thin ruler strip.
+  timelineScrollEl.addEventListener('click', e => {
+    if (e.target === timelinePlayheadEl || timelinePlayheadEl.contains(e.target)) return;
+    if (suppressSeekClick) { suppressSeekClick = false; return; } // just finished dragging a clip
     const rect = timelineScrollEl.getBoundingClientRect();
     seekFromContentX(e.clientX - rect.left + timelineScrollEl.scrollLeft);
   });
@@ -937,7 +1036,10 @@
 
       box.addEventListener('mousedown', e => startClipDrag(e, box, clip, kind));
       box.addEventListener('click', e => {
-        e.stopPropagation();
+        // Deliberately not stopPropagation: the click still needs to reach
+        // the timeline so the playhead lands where you clicked. Flagging it
+        // just stops the lane handler below from clearing the selection.
+        e.clipHandled = true;
         setSelectedClip(clip.id);
       });
       timelineLaneEl.appendChild(box);
@@ -974,6 +1076,10 @@
     renderInspector();
   }
 
+  // A clip drag ends in a click event on the timeline; without this the
+  // playhead would jump to wherever the clip was dropped.
+  let suppressSeekClick = false;
+
   function startClipDrag(e, boxEl, clip, kind) {
     e.preventDefault();
     dragState = {
@@ -993,6 +1099,7 @@
     const newLeftPx = Math.max(0, dragState.startLeftPx + deltaPx);
     dragState.boxEl.style.left = newLeftPx + 'px';
     dragState.newStartTime = newLeftPx / PX_PER_SEC;
+    suppressSeekClick = true;
   }
 
   async function onClipDragEnd() {
@@ -1063,22 +1170,30 @@
       setSelectedClip(null);
       return;
     }
+    // I and O mark the cut points at the line, the way editors expect.
+    if (e.key === 'i' || e.key === 'I') { e.preventDefault(); markIn(); return; }
+    if (e.key === 'o' || e.key === 'O') { e.preventDefault(); markOut(); return; }
+
     if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
       e.preventDefault();
       const sign = e.key === 'ArrowLeft' ? -1 : 1;
-      if (selectedClipId) {
-        // moving a clip in whole seconds is more useful than sub-second —
-        // shift for a coarser 1s nudge, plain for a fine 0.1s one
+      if (e.altKey) {
+        // Alt keeps the old behaviour: shove the selected clip along the
+        // timeline instead of moving the line.
         nudgeSelectedClip(sign * (e.shiftKey ? 1 : 0.1));
-      } else {
-        // plain arrow = ~1s (close enough to "a frame or two" without
-        // needing to know the source's actual fps), shift = 5s jump
-        previewEl.currentTime = Math.max(0, previewEl.currentTime + sign * (e.shiftKey ? 5 : 1));
+        return;
       }
+      // Arrows move the playhead — a small, steady step so you can land it
+      // exactly where you want to cut. Shift covers ground faster.
+      const step = e.shiftKey ? 1 : 0.1;
+      previewEl.currentTime = Math.max(0, previewEl.currentTime + sign * step);
     }
   });
 
-  timelineLaneEl.addEventListener('click', () => setSelectedClip(null));
+  timelineLaneEl.addEventListener('click', e => {
+    if (e.clipHandled) return; // a clip was clicked; keep it selected
+    setSelectedClip(null);
+  });
 
   // ---- inspector: real per-clip colour adjustment, no sliders ----
   const EFFECT_FIELDS = [
@@ -1366,20 +1481,23 @@
   function updateRangeReadout() {
     // tenths here, unlike the m:ss used elsewhere: this range is the exact
     // cut that gets made, and flooring 2.9s to "0:02" misrepresents it
-    const precise = s => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
-    rangeReadoutEl.textContent = `${precise(inPoint)} → ${precise(outPoint)}`;
+    rangeReadoutEl.textContent = `${formatTimePrecise(inPoint)} → ${formatTimePrecise(outPoint)}`;
+    updateRangeBand();
   }
 
-  markInBtnEl.addEventListener('click', () => {
+  function markIn() {
     inPoint = previewEl.currentTime || 0;
     if (outPoint <= inPoint) outPoint = inPoint + 1;
     updateRangeReadout();
-  });
-  markOutBtnEl.addEventListener('click', () => {
+  }
+  function markOut() {
     outPoint = previewEl.currentTime || 0;
     if (outPoint <= inPoint) inPoint = Math.max(0, outPoint - 1);
     updateRangeReadout();
-  });
+  }
+
+  markInBtnEl.addEventListener('click', markIn);
+  markOutBtnEl.addEventListener('click', markOut);
 
   async function cutScene() {
     const start = inPoint;
@@ -1488,15 +1606,15 @@
     if (!text) return;
     composerInputEl.value = '';
     addComposerMessage('user', text);
-    const pendingEl = addComposerMessage('ai', 'Working…', { pending: true });
+    const pendingEl = addThinkingBubble();
 
     // chat(), not run_command(): exact commands still take the instant
     // offline path inside it, but "hello" or a half-formed request gets a
     // real reply or a follow-up question instead of a parser error.
     const response = await window.pywebview.api.chat(text, previewEl.currentTime || 0, selectedClipId);
-    if (!response) { pendingEl.remove(); return; }
+    if (!response) { clearThinkingBubble(pendingEl); return; }
 
-    pendingEl.remove();
+    clearThinkingBubble(pendingEl);
     addComposerMessage('ai', response.message || response.error || "Didn't catch that.", { error: !!response.error });
 
     if (response.error) return; // unrecognized or failed — nothing else changed
