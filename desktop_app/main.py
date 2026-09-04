@@ -21,7 +21,10 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import webview
-from core_engine import ffmpeg_ops, project_state, whisper_ops, script_ops, llm_ops, motion_graphics_ops
+from core_engine import (
+    ffmpeg_ops, project_state, whisper_ops, script_ops, llm_ops,
+    motion_graphics_ops, link_ops,
+)
 
 SCENECRAFT_ROOT = Path.home() / "Scenecraft"
 SETTINGS_PATH = SCENECRAFT_ROOT / "settings.json"
@@ -566,6 +569,35 @@ class Api:
         self._save_project()
         return {"transcript": segments}
 
+    def transcribe_link(self, url: str):
+        """Transcribe a video or audio URL without importing it first —
+        paste a link into the composer and get its transcript back.
+
+        The transcript replaces the project's current one (it's the thing
+        search and caption generation read from), so this is transcribing
+        *that* link, not merging it into an existing transcript."""
+        if not self.project:
+            return {"error": "No project loaded."}
+        url = link_ops.find_url(url or "") or (url or "").strip()
+        if not url.lower().startswith(("http://", "https://")):
+            return {"error": "That doesn't look like a link. Paste a full http(s) video or audio URL."}
+
+        self._progress("Fetching the audio")
+        try:
+            path, title = link_ops.fetch_audio(url, SCENECRAFT_ROOT / self.project.name / "linked")
+        except link_ops.LinkFetchError as e:
+            return {"error": str(e)}
+
+        self._progress("Transcribing the audio")
+        try:
+            segments = whisper_ops.transcribe(path)
+        except Exception as e:
+            return {"error": f"Downloaded it, but transcribing failed: {e}"}
+
+        self.project.transcript = segments
+        self._save_project()
+        return {"ok": True, "title": title, "path": path, "transcript": segments}
+
     def search_transcript(self, query: str):
         if not self.project:
             return []
@@ -705,6 +737,20 @@ class Api:
         if not raw:
             return {"error": "Type a command first."}
         t = raw.lower()
+
+        # A link is unambiguous, and checked first so a URL that happens to
+        # contain a word like "export" can't be read as a command.
+        linked_url = link_ops.find_url(raw)
+        if linked_url:
+            result = self.transcribe_link(linked_url)
+            if "error" in result:
+                return {"action": "transcribe", "message": result["error"], "result": result}
+            n = len(result["transcript"])
+            return {
+                "action": "transcribe",
+                "message": f"Transcribed “{result['title']}” — {n} segments. Open Transcript to read or search it.",
+                "result": result,
+            }
 
         def num(s: str) -> float:
             return float(s)
@@ -873,7 +919,7 @@ class Api:
                 "\"cut at 3 seconds\", \"add music\", \"add captions\", \"go to 1:23\", \"brighter\"/\"darker\", "
                 "\"more contrast\"/\"less contrast\", \"more saturation\"/\"less saturation\", "
                 "\"black and white\", \"reset effects\", \"generate a motion graphic of X\", "
-                "\"transcribe\", \"search for fox\", or \"export\". If a local AI (Ollama) is "
+                "\"transcribe\", a pasted video/audio link to transcribe, \"search for fox\", or \"export\". If a local AI (Ollama) is "
                 "running, phrasings close to these are also understood even if not word-for-word."
             )
         }
